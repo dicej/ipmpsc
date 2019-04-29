@@ -166,7 +166,7 @@ where
 
 pub fn channel<T>(size_in_bytes: u32) -> Result<(String, Receiver<T>), Error>
 where
-    T: for<'de> Deserialize<'de> + Serialize,
+    T: for<'de> Deserialize<'de>,
 {
     let file = NamedTempFile::new()?;
 
