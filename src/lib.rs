@@ -1,5 +1,9 @@
 #![deny(warnings)]
 
+#[cfg(test)]
+#[macro_use]
+extern crate serde_derive;
+
 use failure::{format_err, Error};
 use memmap::MmapMut;
 use serde::{Deserialize, Serialize};
@@ -11,10 +15,13 @@ use std::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
     },
+    time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
+
+const LONG_TIME_SECS: u64 = 60 * 60 * 24 * 365 * 1000;
 
 macro_rules! nonzero {
     ($x:expr) => {{
@@ -90,6 +97,21 @@ impl<'a> Lock<'a> {
             ))
         }
     }
+
+    fn timed_wait(&self, timeout: Duration) -> Result<(), Error> {
+        let timespec = libc::timespec {
+            tv_sec: timeout.as_secs() as i64,
+            tv_nsec: i64::from(timeout.subsec_nanos()),
+        };
+
+        unsafe {
+            nonzero!(libc::pthread_cond_timedwait(
+                self.0.condition.get(),
+                self.0.mutex.get(),
+                &timespec
+            ))
+        }
+    }
 }
 
 impl<'a> Drop for Lock<'a> {
@@ -106,12 +128,35 @@ pub struct Receiver {
 }
 
 impl Receiver {
+    fn header(&self) -> &Header {
+        #[allow(clippy::cast_ptr_alignment)]
+        unsafe {
+            &*(self.map.as_ptr() as *const Header)
+        }
+    }
+
+    fn seek(&self, position: u32) -> Result<(), Error> {
+        let header = self.header();
+        let _lock = header.lock()?;
+        header.read.store(position, SeqCst);
+        header.notify_all()
+    }
+
     pub fn try_recv<T>(&self) -> Result<Option<T>, Error>
     where
         T: for<'de> Deserialize<'de>,
     {
-        #[allow(clippy::cast_ptr_alignment)]
-        let header = unsafe { &*(self.map.as_ptr() as *const Header) };
+        Ok(if let Some((value, position)) = self.try_recv_0()? {
+            self.seek(position)?;
+
+            Some(value)
+        } else {
+            None
+        })
+    }
+
+    fn try_recv_0<'a, T: Deserialize<'a>>(&'a self) -> Result<Option<(T, u32)>, Error> {
+        let header = self.header();
 
         let mut read = header.read.load(SeqCst);
         let write = header.write.load(SeqCst);
@@ -123,11 +168,10 @@ impl Receiver {
                 let size = bincode::deserialize::<u32>(&buffer[read as usize..start as usize])?;
                 if size > 0 {
                     let end = start + size;
-                    let value = bincode::deserialize(&buffer[start as usize..end as usize])?;
-                    let _lock = header.lock()?;
-                    header.read.store(end, SeqCst);
-                    header.notify_all()?;
-                    break Some(value);
+                    break Some((
+                        bincode::deserialize(&buffer[start as usize..end as usize])?,
+                        end,
+                    ));
                 } else if write < read {
                     read = BEGINNING;
                     let _lock = header.lock()?;
@@ -146,21 +190,80 @@ impl Receiver {
     where
         T: for<'de> Deserialize<'de>,
     {
-        Ok(loop {
-            if let Some(value) = self.try_recv()? {
-                break value;
+        self.recv_timeout(Duration::from_secs(LONG_TIME_SECS))
+            .map(Option::unwrap)
+    }
+
+    pub fn recv_timeout<T>(&self, timeout: Duration) -> Result<Option<T>, Error>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        Ok(
+            if let Some((value, position)) = self.recv_timeout_0(timeout)? {
+                self.seek(position)?;
+
+                Some(value)
+            } else {
+                None
+            },
+        )
+    }
+
+    /// Perform zero-copy deserialization.  Any byte or string
+    /// references in the deserialized value will refer directly to
+    /// the ring buffer maintained by this channel.
+    ///
+    /// NOTE CAREFULLY: Any references in the deserialized value will
+    /// become invalid once the callback returns since the space they
+    /// occupy will be overwritten by new messages.  Any data to be
+    /// retained must be copied out of those the references before the
+    /// callback returns.
+    ///
+    // TODO: is there a way to enforce the above requirement and
+    // thereby make this method safe?
+    pub unsafe fn recv_timeout_zero_copy<'a, T: Deserialize<'a>>(
+        &'a self,
+        timeout: Duration,
+        callback: impl FnOnce(T),
+    ) -> Result<bool, Error> {
+        Ok(
+            if let Some((value, position)) = self.recv_timeout_0(timeout)? {
+                (callback)(value);
+                self.seek(position)?;
+
+                true
+            } else {
+                false
+            },
+        )
+    }
+
+    fn recv_timeout_0<'a, T: Deserialize<'a>>(
+        &'a self,
+        timeout: Duration,
+    ) -> Result<Option<(T, u32)>, Error> {
+        loop {
+            if let Some(value_and_position) = self.try_recv_0()? {
+                return Ok(Some(value_and_position));
             }
 
-            #[allow(clippy::cast_ptr_alignment)]
-            let header = unsafe { &*(self.map.as_ptr() as *const Header) };
+            let header = self.header();
 
             let read = header.read.load(SeqCst);
 
+            let mut now = Instant::now();
+            let deadline = now + timeout;
+
             let lock = header.lock()?;
             while read == header.write.load(SeqCst) {
-                lock.wait()?;
+                if deadline > now {
+                    lock.timed_wait(deadline - now)?;
+                    now = Instant::now();
+                } else {
+                    return Ok(None);
+                }
             }
-        })
+        }
     }
 }
 
@@ -328,6 +431,33 @@ mod tests {
                 .collect::<Vec<_>>(),
         }
         .run()
+    }
+
+    #[test]
+    fn zero_copy() -> Result<(), Error> {
+        #[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
+        struct Foo<'a> {
+            borrowed_str: &'a str,
+            borrowed_bytes: &'a [u8],
+        }
+
+        let sent = Foo {
+            borrowed_str: "hi",
+            borrowed_bytes: &[0, 1, 2, 3],
+        };
+
+        let (name, rx) = channel(256)?;
+        let tx = sender(&name)?;
+
+        tx.send(&sent)?;
+
+        unsafe {
+            rx.recv_timeout_zero_copy(Duration::from_secs(LONG_TIME_SECS), |received| {
+                assert_eq!(sent, received);
+            })?;
+        }
+
+        Ok(())
     }
 
     proptest! {
