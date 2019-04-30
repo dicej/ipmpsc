@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     cell::UnsafeCell,
     fs::OpenOptions,
-    marker::PhantomData,
     mem,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
@@ -101,17 +100,16 @@ impl<'a> Drop for Lock<'a> {
     }
 }
 
-pub struct Receiver<T> {
+pub struct Receiver {
     map: MmapMut,
     _file: NamedTempFile,
-    _phantom: PhantomData<T>,
 }
 
-impl<T> Receiver<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    pub fn try_recv(&self) -> Result<Option<T>, Error> {
+impl Receiver {
+    pub fn try_recv<T>(&self) -> Result<Option<T>, Error>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
         #[allow(clippy::cast_ptr_alignment)]
         let header = unsafe { &*(self.map.as_ptr() as *const Header) };
 
@@ -122,11 +120,10 @@ where
             if write != read {
                 let buffer = self.map.as_ref();
                 let start = read + 4;
-                let size =
-                    bincode::deserialize_from::<_, u32>(&buffer[read as usize..start as usize])?;
+                let size = bincode::deserialize::<u32>(&buffer[read as usize..start as usize])?;
                 if size > 0 {
                     let end = start + size;
-                    let value = bincode::deserialize_from(&buffer[start as usize..end as usize])?;
+                    let value = bincode::deserialize(&buffer[start as usize..end as usize])?;
                     let _lock = header.lock()?;
                     header.read.store(end, SeqCst);
                     header.notify_all()?;
@@ -145,7 +142,10 @@ where
         })
     }
 
-    pub fn recv(&self) -> Result<T, Error> {
+    pub fn recv<T>(&self) -> Result<T, Error>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
         Ok(loop {
             if let Some(value) = self.try_recv()? {
                 break value;
@@ -164,10 +164,7 @@ where
     }
 }
 
-pub fn channel<T>(size_in_bytes: u32) -> Result<(String, Receiver<T>), Error>
-where
-    T: for<'de> Deserialize<'de>,
-{
+pub fn channel(size_in_bytes: u32) -> Result<(String, Receiver), Error> {
     let file = NamedTempFile::new()?;
 
     file.as_file()
@@ -186,22 +183,21 @@ where
             .to_str()
             .ok_or_else(|| format_err!("unable to represent path as string"))?
             .to_owned(),
-        Receiver {
-            map,
-            _file: file,
-            _phantom: PhantomData,
-        },
+        Receiver { map, _file: file },
     ))
 }
 
 #[derive(Clone)]
-pub struct Sender<T> {
+pub struct Sender {
     map: Arc<UnsafeCell<MmapMut>>,
-    _phantom: PhantomData<T>,
 }
 
-impl<T: Serialize> Sender<T> {
-    pub fn send(&self, value: &T) -> Result<(), Error> {
+unsafe impl Sync for Sender {}
+
+unsafe impl Send for Sender {}
+
+impl Sender {
+    pub fn send(&self, value: &impl Serialize) -> Result<(), Error> {
         #[allow(clippy::cast_ptr_alignment)]
         let header = unsafe { &*((*self.map.get()).as_ptr() as *const Header) };
 
@@ -267,13 +263,12 @@ impl<T: Serialize> Sender<T> {
     }
 }
 
-pub fn sender<T: Serialize>(channel: &str) -> Result<Sender<T>, Error> {
+pub fn sender(channel: &str) -> Result<Sender, Error> {
     let file = OpenOptions::new().read(true).write(true).open(channel)?;
     let map = unsafe { MmapMut::map_mut(&file)? };
 
     Ok(Sender {
         map: Arc::new(UnsafeCell::new(map)),
-        _phantom: PhantomData,
     })
 }
 
@@ -291,12 +286,12 @@ mod tests {
 
     impl Case {
         fn run(&self) -> Result<(), Error> {
-            let (name, rx) = channel::<Vec<u8>>(self.channel_size)?;
+            let (name, rx) = channel(self.channel_size)?;
 
             let expected = self.data.clone();
             let receiver_thread = thread::spawn(move || -> Result<(), Error> {
                 for item in &expected {
-                    let received = rx.recv()?;
+                    let received = rx.recv::<Vec<u8>>()?;
                     assert_eq!(item, &received);
                 }
 
