@@ -224,12 +224,13 @@ impl Receiver {
     pub unsafe fn recv_timeout_zero_copy<'a, T: Deserialize<'a>>(
         &'a self,
         timeout: Duration,
-        callback: impl FnOnce(T),
+        callback: impl FnOnce(T) -> Result<(), Error>,
     ) -> Result<bool, Error> {
         Ok(
             if let Some((value, position)) = self.recv_timeout_0(timeout)? {
-                (callback)(value);
+                let result = (callback)(value);
                 self.seek(position)?;
+                result?;
 
                 true
             } else {
@@ -454,6 +455,7 @@ mod tests {
         unsafe {
             rx.recv_timeout_zero_copy(Duration::from_secs(LONG_TIME_SECS), |received| {
                 assert_eq!(sent, received);
+                Ok(())
             })?;
         }
 
