@@ -21,7 +21,7 @@ use tempfile::NamedTempFile;
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
-const LONG_TIME_SECS: u64 = 60 * 60 * 24 * 365 * 1000;
+const MILLENIUM_SECS: u64 = 60 * 60 * 24 * 365 * 1000;
 
 macro_rules! nonzero {
     ($x:expr) => {{
@@ -127,6 +127,63 @@ pub struct Receiver {
     _file: NamedTempFile,
 }
 
+pub struct ZeroCopyReceiver<'a> {
+    receiver: &'a Receiver,
+    position: Option<u32>,
+}
+
+impl<'a> ZeroCopyReceiver<'a> {
+    pub fn try_recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<Option<T>, Error> {
+        if self.position.is_some() {
+            Err(format_err!(
+                "ZeroCopyReceiver may only be used to receive one message"
+            ))
+        } else {
+            Ok(
+                if let Some((value, position)) = self.receiver.try_recv_0()? {
+                    self.position = Some(position);
+                    Some(value)
+                } else {
+                    None
+                },
+            )
+        }
+    }
+
+    pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T, Error> {
+        self.recv_timeout(Duration::from_secs(MILLENIUM_SECS))
+            .map(Option::unwrap)
+    }
+
+    pub fn recv_timeout<'b, T: Deserialize<'b>>(
+        &'b mut self,
+        timeout: Duration,
+    ) -> Result<Option<T>, Error> {
+        if self.position.is_some() {
+            Err(format_err!(
+                "ZeroCopyReceiver may only be used to receive one message"
+            ))
+        } else {
+            Ok(
+                if let Some((value, position)) = self.receiver.recv_timeout_0(timeout)? {
+                    self.position = Some(position);
+                    Some(value)
+                } else {
+                    None
+                },
+            )
+        }
+    }
+}
+
+impl<'a> Drop for ZeroCopyReceiver<'a> {
+    fn drop(&mut self) {
+        if let Some(position) = self.position.take() {
+            let _ = self.receiver.seek(position);
+        }
+    }
+}
+
 impl Receiver {
     fn header(&self) -> &Header {
         #[allow(clippy::cast_ptr_alignment)]
@@ -190,7 +247,7 @@ impl Receiver {
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.recv_timeout(Duration::from_secs(LONG_TIME_SECS))
+        self.recv_timeout(Duration::from_secs(MILLENIUM_SECS))
             .map(Option::unwrap)
     }
 
@@ -209,34 +266,31 @@ impl Receiver {
         )
     }
 
-    /// Perform zero-copy deserialization.  Any byte or string
-    /// references in the deserialized value will refer directly to
-    /// the ring buffer maintained by this channel.
+    /// Borrows this receiver as a zero-copy receiver, which supports
+    /// deserializing messages with references that refer directly to
+    /// this `Receiver`'s ring buffer rather than copying out of it.
+    /// Because those references refer directly to the ring buffer, the
+    /// read pointer cannot be advanced until the lifetime of those
+    /// references ends.
     ///
-    /// NOTE CAREFULLY: Any references in the deserialized value will
-    /// become invalid once the callback returns since the space they
-    /// occupy will be overwritten by new messages.  Any data to be
-    /// retained must be copied out of those the references before the
-    /// callback returns.
+    /// To ensure the above, the following rules apply:
     ///
-    // TODO: is there a way to enforce the above requirement and
-    // thereby make this method safe?
-    pub unsafe fn recv_timeout_zero_copy<'a, T: Deserialize<'a>>(
-        &'a self,
-        timeout: Duration,
-        callback: impl FnOnce(T) -> Result<(), Error>,
-    ) -> Result<bool, Error> {
-        Ok(
-            if let Some((value, position)) = self.recv_timeout_0(timeout)? {
-                let result = (callback)(value);
-                self.seek(position)?;
-                result?;
-
-                true
-            } else {
-                false
-            },
-        )
+    /// 1. The underlying `Receiver` cannot be used while a
+    /// `ZeroCopyReceiver` is borrowed from it (enforced at compile time).
+    ///
+    /// 2. References in a message deserialized using a given
+    /// `ZeroCopyReceiver` cannot outlive that receiver (enforced at
+    /// compile time).
+    ///
+    /// 3. A given `ZeroCopyReceiver` can only be used to deserialize
+    /// a single message before it must be discarded since the read
+    /// pointer is advanced only when the receiver is dropped
+    /// (enforced at run time).
+    pub fn zero_copy_receiver(&mut self) -> ZeroCopyReceiver {
+        ZeroCopyReceiver {
+            receiver: self,
+            position: None,
+        }
     }
 
     fn recv_timeout_0<'a, T: Deserialize<'a>>(
@@ -447,17 +501,22 @@ mod tests {
             borrowed_bytes: &[0, 1, 2, 3],
         };
 
-        let (name, rx) = channel(256)?;
+        let (name, mut rx) = channel(256)?;
         let tx = sender(&name)?;
 
         tx.send(&sent)?;
+        tx.send(&42_u32)?;
 
-        unsafe {
-            rx.recv_timeout_zero_copy(Duration::from_secs(LONG_TIME_SECS), |received| {
-                assert_eq!(sent, received);
-                Ok(())
-            })?;
-        }
+        {
+            let mut rx = rx.zero_copy_receiver();
+            let received = rx.recv()?;
+
+            assert_eq!(sent, received);
+
+            received.borrowed_str
+        };
+
+        assert_eq!(42_u32, rx.recv()?);
 
         Ok(())
     }
