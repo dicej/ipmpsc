@@ -9,7 +9,7 @@ use memmap::MmapMut;
 use serde::{Deserialize, Serialize};
 use std::{
     cell::UnsafeCell,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     mem,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
@@ -124,7 +124,7 @@ impl<'a> Drop for Lock<'a> {
 
 pub struct Receiver {
     map: MmapMut,
-    _file: NamedTempFile,
+    _file: Option<NamedTempFile>,
 }
 
 pub struct ZeroCopyReceiver<'a> {
@@ -328,21 +328,38 @@ pub fn channel(size_in_bytes: u32) -> Result<(String, Receiver), Error> {
     file.as_file()
         .set_len(u64::from(BEGINNING + size_in_bytes))?;
 
-    let map = unsafe {
-        let map = MmapMut::map_mut(file.as_file())?;
-
-        #[allow(clippy::cast_ptr_alignment)]
-        (*(map.as_ptr() as *const Header)).init()?;
-        map
-    };
-
     Ok((
         file.path()
             .to_str()
             .ok_or_else(|| format_err!("unable to represent path as string"))?
             .to_owned(),
-        Receiver { map, _file: file },
+        Receiver {
+            map: map(file.as_file())?,
+            _file: Some(file),
+        },
     ))
+}
+
+pub fn receiver(path: &str, size_in_bytes: u32) -> Result<Receiver, Error> {
+    let file = OpenOptions::new().read(true).create(true).open(path)?;
+
+    file.set_len(u64::from(BEGINNING + size_in_bytes))?;
+
+    Ok(Receiver {
+        map: map(&file)?,
+        _file: None,
+    })
+}
+
+fn map(file: &File) -> Result<MmapMut, Error> {
+    unsafe {
+        let map = MmapMut::map_mut(&file)?;
+
+        #[allow(clippy::cast_ptr_alignment)]
+        (*(map.as_ptr() as *const Header)).init()?;
+
+        Ok(map)
+    }
 }
 
 #[derive(Clone)]
