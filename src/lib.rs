@@ -11,6 +11,7 @@ use std::{
     cell::UnsafeCell,
     fs::{File, OpenOptions},
     mem,
+    os::raw::c_long,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
@@ -22,6 +23,14 @@ use tempfile::NamedTempFile;
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
 const MILLENIUM_SECS: u64 = 60 * 60 * 24 * 365 * 1000;
+
+// libc::PTHREAD_PROCESS_SHARED doesn't exist for Android for some
+// reason, so we need to declare it ourselves:
+#[cfg(target_os = "android")]
+const PTHREAD_PROCESS_SHARED: i32 = 1;
+
+#[cfg(not(target_os = "android"))]
+const PTHREAD_PROCESS_SHARED: i32 = libc::PTHREAD_PROCESS_SHARED;
 
 macro_rules! nonzero {
     ($x:expr) => {{
@@ -49,7 +58,7 @@ impl Header {
             nonzero!(libc::pthread_mutexattr_init(&mut attr))?;
             nonzero!(libc::pthread_mutexattr_setpshared(
                 &mut attr,
-                libc::PTHREAD_PROCESS_SHARED
+                PTHREAD_PROCESS_SHARED
             ))?;
             nonzero!(libc::pthread_mutex_init(self.mutex.get(), &attr))?;
             nonzero!(libc::pthread_mutexattr_destroy(&mut attr))?;
@@ -58,7 +67,7 @@ impl Header {
             nonzero!(libc::pthread_condattr_init(&mut attr))?;
             nonzero!(libc::pthread_condattr_setpshared(
                 &mut attr,
-                libc::PTHREAD_PROCESS_SHARED
+                PTHREAD_PROCESS_SHARED
             ))?;
             nonzero!(libc::pthread_cond_init(self.condition.get(), &attr))?;
             nonzero!(libc::pthread_condattr_destroy(&mut attr))?;
@@ -98,10 +107,11 @@ impl<'a> Lock<'a> {
         }
     }
 
+    #[allow(clippy::cast_lossless)]
     fn timed_wait(&self, timeout: Duration) -> Result<(), Error> {
         let timespec = libc::timespec {
-            tv_sec: timeout.as_secs() as i64,
-            tv_nsec: i64::from(timeout.subsec_nanos()),
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_nsec: timeout.subsec_nanos() as c_long,
         };
 
         unsafe {
