@@ -22,7 +22,7 @@ use tempfile::NamedTempFile;
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
-const MILLENIUM_SECS: u64 = 60 * 60 * 24 * 365 * 1000;
+const DECADE_SECS: u64 = 60 * 60 * 24 * 365 * 10;
 
 // libc::PTHREAD_PROCESS_SHARED doesn't exist for Android for some
 // reason, so we need to declare it ourselves:
@@ -168,7 +168,7 @@ impl<'a> ZeroCopyReceiver<'a> {
     }
 
     pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T, Error> {
-        self.recv_timeout(Duration::from_secs(MILLENIUM_SECS))
+        self.recv_timeout(Duration::from_secs(DECADE_SECS))
             .map(Option::unwrap)
     }
 
@@ -264,7 +264,7 @@ impl Receiver {
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.recv_timeout(Duration::from_secs(MILLENIUM_SECS))
+        self.recv_timeout(Duration::from_secs(DECADE_SECS))
             .map(Option::unwrap)
     }
 
@@ -314,6 +314,7 @@ impl Receiver {
         &'a self,
         timeout: Duration,
     ) -> Result<Option<(T, u32)>, Error> {
+        let mut deadline = None;
         loop {
             if let Some(value_and_position) = self.try_recv_0()? {
                 return Ok(Some(value_and_position));
@@ -321,13 +322,14 @@ impl Receiver {
 
             let header = self.header();
 
-            let read = header.read.load(SeqCst);
-
             let mut now = Instant::now();
-            let deadline = now + timeout;
+            deadline = deadline.or_else(|| Some(now + timeout));
+
+            let read = header.read.load(SeqCst);
 
             let lock = header.lock()?;
             while read == header.write.load(SeqCst) {
+                let deadline = deadline.unwrap();
                 if deadline > now {
                     lock.timed_wait(deadline - now)?;
                     now = Instant::now();
