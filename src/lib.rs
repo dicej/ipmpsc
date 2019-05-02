@@ -16,7 +16,7 @@ use std::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tempfile::NamedTempFile;
 
@@ -109,17 +109,24 @@ impl<'a> Lock<'a> {
 
     #[allow(clippy::cast_lossless)]
     fn timed_wait(&self, timeout: Duration) -> Result<(), Error> {
-        let timespec = libc::timespec {
-            tv_sec: timeout.as_secs() as libc::time_t,
-            tv_nsec: timeout.subsec_nanos() as c_long,
+        let then = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            + timeout;
+
+        let then = libc::timespec {
+            tv_sec: then.as_secs() as libc::time_t,
+            tv_nsec: then.subsec_nanos() as c_long,
         };
 
+        let timeout_ok = |result| if result == libc::ETIMEDOUT { 0 } else { result };
+
         unsafe {
-            nonzero!(libc::pthread_cond_timedwait(
+            nonzero!(timeout_ok(libc::pthread_cond_timedwait(
                 self.0.condition.get(),
                 self.0.mutex.get(),
-                &timespec
-            ))
+                &then
+            )))
         }
     }
 }
@@ -351,7 +358,12 @@ pub fn channel(size_in_bytes: u32) -> Result<(String, Receiver), Error> {
 }
 
 pub fn receiver(path: &str, size_in_bytes: u32) -> Result<Receiver, Error> {
-    let file = OpenOptions::new().read(true).create(true).open(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
 
     file.set_len(u64::from(BEGINNING + size_in_bytes))?;
 
