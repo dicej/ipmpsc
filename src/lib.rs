@@ -397,6 +397,14 @@ unsafe impl Send for Sender {}
 
 impl Sender {
     pub fn send(&self, value: &impl Serialize) -> Result<(), Error> {
+        self.send_0(value, false)
+    }
+
+    pub fn send_when_empty(&self, value: &impl Serialize) -> Result<(), Error> {
+        self.send_0(value, true)
+    }
+
+    pub fn send_0(&self, value: &impl Serialize, wait_until_empty: bool) -> Result<(), Error> {
         #[allow(clippy::cast_ptr_alignment)]
         let header = unsafe { &*((*self.map.get()).as_ptr() as *const Header) };
 
@@ -417,7 +425,7 @@ impl Sender {
         loop {
             let read = header.read.load(SeqCst);
 
-            if write >= read {
+            if write == read || (write > read && !wait_until_empty) {
                 if (write + size + 8) as usize <= map_len {
                     break;
                 } else if read != BEGINNING {
@@ -434,7 +442,7 @@ impl Sender {
                     header.notify()?;
                     continue;
                 }
-            } else if write + size + 8 <= read {
+            } else if write + size + 8 <= read && !wait_until_empty {
                 break;
             }
 
