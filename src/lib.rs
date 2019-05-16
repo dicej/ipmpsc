@@ -561,9 +561,7 @@ mod tests {
             let received = rx.recv()?;
 
             assert_eq!(sent, received);
-
-            received.borrowed_str
-        };
+        }
 
         assert_eq!(42_u32, rx.recv()?);
 
