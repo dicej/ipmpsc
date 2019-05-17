@@ -17,3 +17,4 @@ serde_derive = "1"
 [dev-dependencies]
 proptest = "0.9"
 clap = "2"
+serde_bytes = "0.11"

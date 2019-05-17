@@ -4,7 +4,7 @@
 #[macro_use]
 extern crate serde_derive;
 
-use failure::{format_err, Error};
+use failure::{format_err, Error, Fail};
 use memmap::MmapMut;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -139,22 +139,39 @@ impl<'a> Drop for Lock<'a> {
     }
 }
 
+/// Represents the receiving end of an inter-process channel, capable
+/// of receiving any message type implementing [`serde::Deserialize`].
+/// Use the [`channel`] or [`receiver`] functions to create one.
 pub struct Receiver {
     map: MmapMut,
     _file: Option<NamedTempFile>,
 }
 
+/// Borrows a [`Receiver`] for the purpose of doing zero-copy
+/// deserialization of messages containing references.  An instance of
+/// this type may only be used to deserialize a single message before
+/// it is dropped because the [`Drop`] implementation is what advances
+/// the ring buffer pointer.  Also, the borrowed [`Receiver`] may not
+/// be used directly while it is borrowed by a [`ZeroCopyReceiver`].
 pub struct ZeroCopyReceiver<'a> {
     receiver: &'a Receiver,
     position: Option<u32>,
 }
 
+/// Error indicating that the caller has attempted to read more than
+/// one message from a given [`ZeroCopyReceiver`].
+#[derive(Fail, Debug)]
+#[fail(display = "A ZeroCopyReceiver may only be used to receive one message")]
+pub struct AlreadyReceived;
+
 impl<'a> ZeroCopyReceiver<'a> {
+    /// Attempt to read a message without blocking.  This will return
+    /// `Ok(None)` if there are no messages immediately available.  It
+    /// will return `Err(Error::from(AlreadyReceived))` if this
+    /// instance has already been used to read a message.
     pub fn try_recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<Option<T>, Error> {
         if self.position.is_some() {
-            Err(format_err!(
-                "ZeroCopyReceiver may only be used to receive one message"
-            ))
+            Err(Error::from(AlreadyReceived))
         } else {
             Ok(
                 if let Some((value, position)) = self.receiver.try_recv_0()? {
@@ -167,19 +184,25 @@ impl<'a> ZeroCopyReceiver<'a> {
         }
     }
 
+    /// Attempt to read a message, blocking if necessary until one
+    /// becomes available.  This will return
+    /// `Err(Error::from(AlreadyReceived))` if this instance has
+    /// already been used to read a message.
     pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T, Error> {
         self.recv_timeout(Duration::from_secs(DECADE_SECS))
             .map(Option::unwrap)
     }
 
+    /// Attempt to read a message, blocking for up to the specified
+    /// duration if necessary until one becomes available.  This will return
+    /// `Err(Error::from(AlreadyReceived))` if this instance has
+    /// already been used to read a message.
     pub fn recv_timeout<'b, T: Deserialize<'b>>(
         &'b mut self,
         timeout: Duration,
     ) -> Result<Option<T>, Error> {
         if self.position.is_some() {
-            Err(format_err!(
-                "ZeroCopyReceiver may only be used to receive one message"
-            ))
+            Err(Error::from(AlreadyReceived))
         } else {
             Ok(
                 if let Some((value, position)) = self.receiver.recv_timeout_0(timeout)? {
@@ -216,6 +239,8 @@ impl Receiver {
         header.notify_all()
     }
 
+    /// Attempt to read a message without blocking.  This will return
+    /// `Ok(None)` if there are no messages immediately available.
     pub fn try_recv<T>(&self) -> Result<Option<T>, Error>
     where
         T: for<'de> Deserialize<'de>,
@@ -260,6 +285,8 @@ impl Receiver {
         })
     }
 
+    /// Attempt to read a message, blocking if necessary until one
+    /// becomes available.
     pub fn recv<T>(&self) -> Result<T, Error>
     where
         T: for<'de> Deserialize<'de>,
@@ -268,6 +295,8 @@ impl Receiver {
             .map(Option::unwrap)
     }
 
+    /// Attempt to read a message, blocking for up to the specified
+    /// duration if necessary until one becomes available.
     pub fn recv_timeout<T>(&self, timeout: Duration) -> Result<Option<T>, Error>
     where
         T: for<'de> Deserialize<'de>,
@@ -285,23 +314,23 @@ impl Receiver {
 
     /// Borrows this receiver as a zero-copy receiver, which supports
     /// deserializing messages with references that refer directly to
-    /// this `Receiver`'s ring buffer rather than copying out of it.
-    /// Because those references refer directly to the ring buffer, the
-    /// read pointer cannot be advanced until the lifetime of those
-    /// references ends.
+    /// this [`Receiver`]'s ring buffer rather than copying out of it.
+    /// Because those references refer directly to the ring buffer,
+    /// the read pointer cannot be advanced until the lifetime of
+    /// those references ends.
     ///
     /// To ensure the above, the following rules apply:
     ///
-    /// 1. The underlying `Receiver` cannot be used while a
-    /// `ZeroCopyReceiver` is borrowed from it (enforced at compile time).
+    /// 1. The underlying [`Receiver`] cannot be used while a
+    /// [`ZeroCopyReceiver`] is borrowed from it (enforced at compile time).
     ///
     /// 2. References in a message deserialized using a given
-    /// `ZeroCopyReceiver` cannot outlive that receiver (enforced at
+    /// [`ZeroCopyReceiver`] cannot outlive that receiver (enforced at
     /// compile time).
     ///
-    /// 3. A given `ZeroCopyReceiver` can only be used to deserialize
-    /// a single message before it must be discarded since the read
-    /// pointer is advanced only when the receiver is dropped
+    /// 3. A given [`ZeroCopyReceiver`] can only be used to
+    /// deserialize a single message before it must be discarded since
+    /// the read pointer is advanced only when the receiver is dropped
     /// (enforced at run time).
     pub fn zero_copy_receiver(&mut self) -> ZeroCopyReceiver {
         ZeroCopyReceiver {
@@ -341,6 +370,10 @@ impl Receiver {
     }
 }
 
+/// Creates a new [`Receiver`] backed by a temporary file.  The name
+/// of the file is returned along with the [`Receiver`] and may be
+/// used to create one or more corresponding senders using the
+/// [`sender`] function.
 pub fn channel(size_in_bytes: u32) -> Result<(String, Receiver), Error> {
     let file = NamedTempFile::new()?;
 
@@ -359,6 +392,9 @@ pub fn channel(size_in_bytes: u32) -> Result<(String, Receiver), Error> {
     ))
 }
 
+/// Creates a new [`Receiver`] backed by a file with the specified
+/// name.  The file will be created if it does not already exist or
+/// truncated otherwise.
 pub fn receiver(path: &str, size_in_bytes: u32) -> Result<Receiver, Error> {
     let file = OpenOptions::new()
         .read(true)
@@ -386,6 +422,8 @@ fn map(file: &File) -> Result<MmapMut, Error> {
     }
 }
 
+/// Represents the sending end of an inter-process channel.  Use the
+/// [`sender`] function to create one.
 #[derive(Clone)]
 pub struct Sender {
     map: Arc<UnsafeCell<MmapMut>>,
@@ -470,8 +508,13 @@ impl Sender {
     }
 }
 
-pub fn sender(channel: &str) -> Result<Sender, Error> {
-    let file = OpenOptions::new().read(true).write(true).open(channel)?;
+/// Creates a new sender backed by a file with the specified name.
+/// The file must already exist and have been initialized by a call to
+/// [`channel`] or [`receiver`].  Any number of senders may be created
+/// for a given receiver, allowing multiple processes to send messages
+/// simultaneously to that receiver.
+pub fn sender(path: &str) -> Result<Sender, Error> {
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
     let map = unsafe { MmapMut::map_mut(&file)? };
 
     Ok(Sender {
@@ -542,6 +585,7 @@ mod tests {
         #[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
         struct Foo<'a> {
             borrowed_str: &'a str,
+            #[serde(with = "serde_bytes")]
             borrowed_bytes: &'a [u8],
         }
 
