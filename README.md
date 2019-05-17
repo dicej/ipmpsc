@@ -4,7 +4,7 @@ Inter-Process Multiple Producer, Single Consumer Channels for Rust
 
 ## Summary
 
-This project provides a type-safe, high-performance inter-process
+This library provides a type-safe, high-performance inter-process
 channel implementation based on a shared memory ring buffer.  It uses
 [bincode](https://github.com/TyOverby/bincode) for (de)serialization,
 including zero-copy deserialization, making it ideal for messages with
@@ -49,3 +49,14 @@ environment in which it runs.
 The current implementation should work on any POSIX-compatible OS.
 It's been tested on Linux and Android.  Windows support is planned but
 has not been started yet.
+
+## Similar Projects
+
+[ipc-channel](https://github.com/servo/ipc-channel) - mature and
+robust IPC channels.  Does not yet support Android, multiple
+simultaneous senders, or zero-copy deserialization.
+
+[shared_memory](https://github.com/elast0ny/shared_memory-rs) -
+low-level, cross-platform shared memory support.  May be used as the
+basis for a ring-buffer based channel, but does not yet support
+Android.
