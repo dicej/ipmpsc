@@ -8,8 +8,8 @@ This library provides a type-safe, high-performance inter-process
 channel implementation based on a shared memory ring buffer.  It uses
 [bincode](https://github.com/TyOverby/bincode) for (de)serialization,
 including zero-copy deserialization, making it ideal for messages with
-large `&str` or `&[u8]` fields.  And it has a name that just rolls off
-the tongue.
+large `&str` or `&[u8]` fields.  And it has a name that rolls right
+off the tongue.
 
 ## Examples
 
@@ -31,7 +31,7 @@ them.
 
 ## Performance
 
-`ipmpsc::Receiver::zero_copy_receiver`, used in combination with
+`ipmpsc::Receiver::zero_copy_context`, used in combination with
 [serde_bytes](https://github.com/serde-rs/bytes), is capable of
 supporting very high bandwidth, low latency transfers
 (e.g. uncompressed video frames).

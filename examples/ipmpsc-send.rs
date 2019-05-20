@@ -2,6 +2,7 @@
 
 use clap::{App, Arg};
 use failure::Error;
+use ipmpsc::Sender;
 use std::io::{self, BufRead};
 
 fn main() -> Result<(), Error> {
@@ -20,7 +21,7 @@ fn main() -> Result<(), Error> {
         .get_matches();
 
     let map_file = matches.value_of("map file").unwrap();
-    let tx = ipmpsc::sender(map_file)?;
+    let tx = Sender::from_path(map_file)?;
 
     let mut buffer = String::new();
     let stdin = io::stdin();

@@ -1,11 +1,11 @@
 //! Inter-Process Multiple Producer, Single Consumer Channels for Rust
 //!
 //! This library provides a type-safe, high-performance inter-process
-//! channel implementation based on a shared memory ring buffer.  It uses
-//! [bincode](https://github.com/TyOverby/bincode) for (de)serialization,
-//! including zero-copy deserialization, making it ideal for messages with
-//! large `&str` or `&[u8]` fields.  And it has a name that just rolls off
-//! the tongue.
+//! channel implementation based on a shared memory ring buffer.  It
+//! uses [bincode](https://github.com/TyOverby/bincode) for
+//! (de)serialization, including zero-copy deserialization, making it
+//! ideal for messages with large `&str` or `&[u8]` fields.  And it
+//! has a name that rolls right off the tongue.
 
 #![deny(warnings)]
 
@@ -13,7 +13,7 @@
 #[macro_use]
 extern crate serde_derive;
 
-use failure::{format_err, Error, Fail};
+use failure::{format_err, Error};
 use memmap::MmapMut;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,6 +40,28 @@ const PTHREAD_PROCESS_SHARED: i32 = 1;
 
 #[cfg(not(target_os = "android"))]
 const PTHREAD_PROCESS_SHARED: i32 = libc::PTHREAD_PROCESS_SHARED;
+
+pub mod error {
+    use failure::Fail;
+
+    /// Error indicating that the caller has attempted to read more than
+    /// one message from a given [`ZeroCopyContext`](struct.ZeroCopyContext.html).
+    #[derive(Fail, Debug)]
+    #[fail(display = "A ZeroCopyContext may only be used to receive one message")]
+    pub struct AlreadyReceived;
+
+    /// Error indicating that the caller attempted to send a message of
+    /// zero serialized size, which is not supported.
+    #[derive(Fail, Debug)]
+    #[fail(display = "Serialized size of message is zero")]
+    pub struct ZeroSizedMessage;
+
+    /// Error indicating that the caller attempted to send a message of
+    /// serialized size greater than the ring buffer capacity.
+    #[derive(Fail, Debug)]
+    #[fail(display = "Serialized size of message is too large for ring buffer")]
+    pub struct MessageTooLarge;
+}
 
 macro_rules! nonzero {
     ($x:expr) => {{
@@ -151,9 +173,6 @@ impl<'a> Drop for Lock<'a> {
 /// Represents the receiving end of an inter-process channel, capable
 /// of receiving any message type implementing
 /// [`serde::Deserialize`](https://docs.serde.rs/serde/trait.Deserialize.html).
-///
-/// Use the [`channel`](fn.channel.html) or
-/// [`receiver`](fn.receiver.html) functions to create one.
 pub struct Receiver {
     map: MmapMut,
     _file: Option<NamedTempFile>,
@@ -168,28 +187,26 @@ pub struct Receiver {
 /// implementation is what advances the ring buffer pointer.  Also,
 /// the borrowed [`Receiver`](struct.Receiver.html) may not be used
 /// directly while it is borrowed by a
-/// [`ZeroCopyReceiver`](struct.ZeroCopyReceiver.html).
-pub struct ZeroCopyReceiver<'a> {
+/// [`ZeroCopyContext`](struct.ZeroCopyContext.html).
+///
+/// Use
+/// [`Receiver::zero_copy_context`](struct.Receiver.html#method.zero_copy_context)
+/// to create an instance.
+pub struct ZeroCopyContext<'a> {
     receiver: &'a Receiver,
     position: Option<u32>,
 }
 
-/// Error indicating that the caller has attempted to read more than
-/// one message from a given [`ZeroCopyReceiver`](struct.ZeroCopyReceiver.html).
-#[derive(Fail, Debug)]
-#[fail(display = "A ZeroCopyReceiver may only be used to receive one message")]
-pub struct AlreadyReceived;
-
-impl<'a> ZeroCopyReceiver<'a> {
+impl<'a> ZeroCopyContext<'a> {
     /// Attempt to read a message without blocking.
     ///
     /// This will return `Ok(None)` if there are no messages
     /// immediately available.  It will return
-    /// `Err(Error::from(`[`AlreadyReceived`](struct.AlreadyReceived.html)`))`
+    /// `Err(Error::from(`[`error::AlreadyReceived`](error/struct.AlreadyReceived.html)`))`
     /// if this instance has already been used to read a message.
     pub fn try_recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<Option<T>, Error> {
         if self.position.is_some() {
-            Err(Error::from(AlreadyReceived))
+            Err(Error::from(error::AlreadyReceived))
         } else {
             Ok(
                 if let Some((value, position)) = self.receiver.try_recv_0()? {
@@ -206,7 +223,7 @@ impl<'a> ZeroCopyReceiver<'a> {
     /// becomes available.
     ///
     /// This will return
-    /// `Err(Error::from(`[`AlreadyReceived`](struct.AlreadyReceived.html)`))`
+    /// `Err(Error::from(`[`error::AlreadyReceived`](error/struct.AlreadyReceived.html)`))`
     /// if this instance has already been used to read a message.
     pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T, Error> {
         self.recv_timeout(Duration::from_secs(DECADE_SECS))
@@ -217,14 +234,14 @@ impl<'a> ZeroCopyReceiver<'a> {
     /// duration if necessary until one becomes available.
     ///
     /// This will return
-    /// `Err(Error::from(`[`AlreadyReceived`](struct.AlreadyReceived.html)`))`
+    /// `Err(Error::from(`[`error::AlreadyReceived`](error/struct.AlreadyReceived.html)`))`
     /// if this instance has already been used to read a message.
     pub fn recv_timeout<'b, T: Deserialize<'b>>(
         &'b mut self,
         timeout: Duration,
     ) -> Result<Option<T>, Error> {
         if self.position.is_some() {
-            Err(Error::from(AlreadyReceived))
+            Err(Error::from(error::AlreadyReceived))
         } else {
             Ok(
                 if let Some((value, position)) = self.receiver.recv_timeout_0(timeout)? {
@@ -238,7 +255,7 @@ impl<'a> ZeroCopyReceiver<'a> {
     }
 }
 
-impl<'a> Drop for ZeroCopyReceiver<'a> {
+impl<'a> Drop for ZeroCopyContext<'a> {
     fn drop(&mut self) {
         if let Some(position) = self.position.take() {
             let _ = self.receiver.seek(position);
@@ -247,6 +264,57 @@ impl<'a> Drop for ZeroCopyReceiver<'a> {
 }
 
 impl Receiver {
+    /// Creates a new [`Receiver`](struct.Receiver.html) backed by a file with the specified
+    /// name.
+    ///
+    /// The file will be created if it does not already exist or
+    /// truncated otherwise.  Once this method has returned
+    /// successfully, any number of senders may be created using the
+    /// [`Sender::from_path`](struct.Sender.html#method.from_path)
+    /// method.
+    pub fn from_path(path: &str, size_in_bytes: u32) -> Result<Receiver, Error> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+
+        file.set_len(u64::from(BEGINNING + size_in_bytes))?;
+
+        Ok(Receiver {
+            map: map(&file)?,
+            _file: None,
+        })
+    }
+
+    /// Creates a new [`Receiver`](struct.Receiver.html) backed by a
+    /// temporary file which will be deleted when the
+    /// [`Receiver`](struct.Receiver.html) is dropped.
+    ///
+    /// The name of the file is returned along with the
+    /// [`Receiver`](struct.Receiver.html) and may be used to create
+    /// one or more corresponding senders using the
+    /// [`Sender::from_path`](struct.Sender.html#method.from_path)
+    /// method.
+    pub fn temp_file(size_in_bytes: u32) -> Result<(String, Receiver), Error> {
+        let file = NamedTempFile::new()?;
+
+        file.as_file()
+            .set_len(u64::from(BEGINNING + size_in_bytes))?;
+
+        Ok((
+            file.path()
+                .to_str()
+                .ok_or_else(|| format_err!("unable to represent path as string"))?
+                .to_owned(),
+            Receiver {
+                map: map(file.as_file())?,
+                _file: Some(file),
+            },
+        ))
+    }
+
     fn header(&self) -> &Header {
         #[allow(clippy::cast_ptr_alignment)]
         unsafe {
@@ -336,10 +404,10 @@ impl Receiver {
         )
     }
 
-    /// Borrows this receiver as a zero-copy receiver, which supports
-    /// deserializing messages with references that refer directly to
-    /// this [`Receiver`](struct.Receiver.html)'s ring buffer rather
-    /// than copying out of it.
+    /// Borrows this receiver for deserializing a message with
+    /// references that refer directly to this
+    /// [`Receiver`](struct.Receiver.html)'s ring buffer rather than
+    /// copying out of it.
     ///
     /// Because those references refer directly to the ring buffer,
     /// the read pointer cannot be advanced until the lifetime of
@@ -348,20 +416,19 @@ impl Receiver {
     /// To ensure the above, the following rules apply:
     ///
     /// 1. The underlying [`Receiver`](struct.Receiver.html) cannot be
-    /// used while a
-    /// [`ZeroCopyReceiver`](struct.ZeroCopyReceiver.html) is borrowed
-    /// from it (enforced at compile time).
+    /// used while a [`ZeroCopyContext`](struct.ZeroCopyContext.html)
+    /// borrows it (enforced at compile time).
     ///
     /// 2. References in a message deserialized using a given
-    /// [`ZeroCopyReceiver`](struct.ZeroCopyReceiver.html) cannot
-    /// outlive that receiver (enforced at compile time).
+    /// [`ZeroCopyContext`](struct.ZeroCopyContext.html) cannot
+    /// outlive that instance (enforced at compile time).
     ///
-    /// 3. A given [`ZeroCopyReceiver`](struct.ZeroCopyReceiver.html)
+    /// 3. A given [`ZeroCopyContext`](struct.ZeroCopyContext.html)
     /// can only be used to deserialize a single message before it
     /// must be discarded since the read pointer is advanced only when
-    /// the receiver is dropped (enforced at run time).
-    pub fn zero_copy_receiver(&mut self) -> ZeroCopyReceiver {
-        ZeroCopyReceiver {
+    /// the instance is dropped (enforced at run time).
+    pub fn zero_copy_context(&mut self) -> ZeroCopyContext {
+        ZeroCopyContext {
             receiver: self,
             position: None,
         }
@@ -398,51 +465,6 @@ impl Receiver {
     }
 }
 
-/// Creates a new [`Receiver`](struct.Receiver.html) backed by a temporary file.
-///
-/// The name of the file is returned along with the
-/// [`Receiver`](struct.Receiver.html) and may be used to create one
-/// or more corresponding senders using the [`sender`](fn.sender.html)
-/// function.
-pub fn channel(size_in_bytes: u32) -> Result<(String, Receiver), Error> {
-    let file = NamedTempFile::new()?;
-
-    file.as_file()
-        .set_len(u64::from(BEGINNING + size_in_bytes))?;
-
-    Ok((
-        file.path()
-            .to_str()
-            .ok_or_else(|| format_err!("unable to represent path as string"))?
-            .to_owned(),
-        Receiver {
-            map: map(file.as_file())?,
-            _file: Some(file),
-        },
-    ))
-}
-
-/// Creates a new [`Receiver`](struct.Receiver.html) backed by a file with the specified
-/// name.
-///
-/// The file will be created if it does not already exist or truncated
-/// otherwise.
-pub fn receiver(path: &str, size_in_bytes: u32) -> Result<Receiver, Error> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-
-    file.set_len(u64::from(BEGINNING + size_in_bytes))?;
-
-    Ok(Receiver {
-        map: map(&file)?,
-        _file: None,
-    })
-}
-
 fn map(file: &File) -> Result<MmapMut, Error> {
     unsafe {
         let map = MmapMut::map_mut(&file)?;
@@ -455,8 +477,6 @@ fn map(file: &File) -> Result<MmapMut, Error> {
 }
 
 /// Represents the sending end of an inter-process channel.
-///
-/// Use the [`sender`](fn.sender.html) function to create one.
 #[derive(Clone)]
 pub struct Sender {
     map: Arc<UnsafeCell<MmapMut>>,
@@ -467,28 +487,75 @@ unsafe impl Sync for Sender {}
 unsafe impl Send for Sender {}
 
 impl Sender {
+    /// Creates a new [`Sender`](struct.Sender.html) backed by a file with
+    /// the specified name.
+    ///
+    /// The file must already exist and have been initialized by a
+    /// call to
+    /// [`Receiver::temp_file`](struct.Receiver.html#method.temp_file)
+    /// or
+    /// [`Receiver::from_path`](struct.Receiver.html#method.from_path).
+    /// Any number of senders may be created for a given receiver,
+    /// allowing multiple processes to send messages simultaneously to
+    /// that receiver.
+    ///
+    /// When creating multiple [`Sender`](struct.Sender.html)s for a
+    /// given [`Receiver`](struct.Receiver.html) in a single process,
+    /// it is much more efficient to use a single `from_path` call and
+    /// `clone` the resulting [`Sender`](struct.Sender.html) than it
+    /// is to make multiple calls to `from_path`.
+    pub fn from_path(path: &str) -> Result<Sender, Error> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        let map = unsafe { MmapMut::map_mut(&file)? };
+
+        Ok(Sender {
+            map: Arc::new(UnsafeCell::new(map)),
+        })
+    }
+
+    /// Send the specified message, waiting for sufficient contiguous
+    /// space to become available in the ring buffer if necessary.
+    ///
+    /// The serialized size of the message must be greater than zero
+    /// or else this method will return
+    /// `Err(Error::from(`[`error::ZeroSizedMessage`](error/struct.ZeroSizedMessage.html)`))`.
+    /// If the serialized size is greater than the ring buffer
+    /// capacity, this method will return
+    /// `Err(Error::from(`[`error::MessageTooLarge`](error/struct.MessageTooLarge.html)`))`.
     pub fn send(&self, value: &impl Serialize) -> Result<(), Error> {
         self.send_0(value, false)
     }
 
+    /// Send the specified message, waiting for the ring buffer to
+    /// become completely empty first.
+    ///
+    /// This method is appropriate for sending time-sensitive messages
+    /// where buffering would introduce undesirable latency.
+    ///
+    /// The serialized size of the message must be greater than zero
+    /// or else this method will return
+    /// `Err(Error::from(`[`error::ZeroSizedMessage`](error/struct.ZeroSizedMessage.html)`))`.
+    /// If the serialized size is greater than the ring buffer
+    /// capacity, this method will return
+    /// `Err(Error::from(`[`error::MessageTooLarge`](error/struct.MessageTooLarge.html)`))`.
     pub fn send_when_empty(&self, value: &impl Serialize) -> Result<(), Error> {
         self.send_0(value, true)
     }
 
-    pub fn send_0(&self, value: &impl Serialize, wait_until_empty: bool) -> Result<(), Error> {
+    fn send_0(&self, value: &impl Serialize, wait_until_empty: bool) -> Result<(), Error> {
         #[allow(clippy::cast_ptr_alignment)]
         let header = unsafe { &*((*self.map.get()).as_ptr() as *const Header) };
 
         let size = bincode::serialized_size(value)? as u32;
 
         if size == 0 {
-            return Err(format_err!("zero sized values not supported"));
+            return Err(Error::from(error::ZeroSizedMessage));
         }
 
         let map_len = unsafe { (*self.map.get()).len() };
 
         if (BEGINNING + size + 8) as usize > map_len {
-            return Err(format_err!("message too large for ring buffer"));
+            return Err(Error::from(error::MessageTooLarge));
         }
 
         let lock = header.lock()?;
@@ -541,23 +608,6 @@ impl Sender {
     }
 }
 
-/// Creates a new [`Sender`](struct.Sender.html) backed by a file with
-/// the specified name.
-///
-/// The file must already exist and have been initialized by a call to
-/// [`channel`](fn.channel.html) or [`receiver`](fn.receiver.html).
-/// Any number of senders may be created for a given receiver,
-/// allowing multiple processes to send messages simultaneously to
-/// that receiver.
-pub fn sender(path: &str) -> Result<Sender, Error> {
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
-    let map = unsafe { MmapMut::map_mut(&file)? };
-
-    Ok(Sender {
-        map: Arc::new(UnsafeCell::new(map)),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,7 +622,7 @@ mod tests {
 
     impl Case {
         fn run(&self) -> Result<(), Error> {
-            let (name, rx) = channel(self.channel_size)?;
+            let (name, rx) = Receiver::temp_file(self.channel_size)?;
 
             let expected = self.data.clone();
             let receiver_thread = thread::spawn(move || -> Result<(), Error> {
@@ -584,7 +634,7 @@ mod tests {
                 Ok(())
             });
 
-            let tx = sender(&name)?;
+            let tx = Sender::from_path(&name)?;
 
             for item in &self.data {
                 tx.send(item)?;
@@ -630,14 +680,14 @@ mod tests {
             borrowed_bytes: &[0, 1, 2, 3],
         };
 
-        let (name, mut rx) = channel(256)?;
-        let tx = sender(&name)?;
+        let (name, mut rx) = Receiver::temp_file(256)?;
+        let tx = Sender::from_path(&name)?;
 
         tx.send(&sent)?;
         tx.send(&42_u32)?;
 
         {
-            let mut rx = rx.zero_copy_receiver();
+            let mut rx = rx.zero_copy_context();
             let received = rx.recv()?;
 
             assert_eq!(sent, received);

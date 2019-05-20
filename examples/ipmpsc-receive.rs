@@ -2,6 +2,7 @@
 
 use clap::{App, Arg};
 use failure::Error;
+use ipmpsc::Receiver;
 
 fn main() -> Result<(), Error> {
     let matches = App::new("ipmpsc-send")
@@ -24,7 +25,7 @@ fn main() -> Result<(), Error> {
         .get_matches();
 
     let map_file = matches.value_of("map file").unwrap();
-    let mut rx = ipmpsc::receiver(map_file, 32 * 1024)?;
+    let mut rx = Receiver::from_path(map_file, 32 * 1024)?;
     let zero_copy = matches.is_present("zero copy");
 
     println!(
@@ -34,7 +35,7 @@ fn main() -> Result<(), Error> {
 
     loop {
         if zero_copy {
-            println!("received {:?}", rx.zero_copy_receiver().recv::<&str>()?);
+            println!("received {:?}", rx.zero_copy_context().recv::<&str>()?);
         } else {
             println!("received {:?}", rx.recv::<String>()?);
         }
