@@ -1,8 +1,15 @@
 [package]
 name = "ipmpsc"
+description = "Inter-process Multiple Producer, Single Consumer Channels"
+readme = "README.md"
+repository = "https://github.com/dicej/ipmpsc"
+documentation = "https://dicej.github.io/doc/ipmpsc"
+keywords = ["ipc", "shared"]
+license = "MIT"
 version = "0.1.0"
 authors = ["Joel Dice <joel.dice@gmail.com>"]
 edition = "2018"
+include = [ "Cargo.toml", "LICENSE.md", "README.md", "src/**/*", "examples/**/*" ]
 
 [dependencies]
 log = "0.4"
