@@ -85,6 +85,11 @@ struct Header {
 impl Header {
     fn init(&self) -> Result<(), Error> {
         unsafe {
+            // TODO: replace mem::uninitialized with MaybeUninit once
+            // Rust 1.36 is released (see
+            // https://gankro.github.io/blah/initialize-me-maybe/ for
+            // why)
+
             let mut attr = mem::uninitialized::<libc::pthread_mutexattr_t>();
             nonzero!(libc::pthread_mutexattr_init(&mut attr))?;
             nonzero!(libc::pthread_mutexattr_setpshared(
