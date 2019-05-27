@@ -122,10 +122,6 @@ impl Header {
         Ok(Lock(self))
     }
 
-    fn notify(&self) -> Result<(), Error> {
-        unsafe { nonzero!(libc::pthread_cond_signal(self.condition.get())) }
-    }
-
     fn notify_all(&self) -> Result<(), Error> {
         unsafe { nonzero!(libc::pthread_cond_broadcast(self.condition.get())) }
     }
@@ -582,7 +578,7 @@ impl Sender {
                     }
                     write = BEGINNING;
                     header.write.store(write, SeqCst);
-                    header.notify()?;
+                    header.notify_all()?;
                     continue;
                 }
             } else if write + size + 8 <= read && !wait_until_empty {
@@ -606,8 +602,7 @@ impl Sender {
         }
 
         header.write.store(end, SeqCst);
-
-        header.notify()?;
+        header.notify_all()?;
 
         Ok(())
     }
