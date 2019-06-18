@@ -1,0 +1,14 @@
+[package]
+name = "ipc-benchmarks"
+version = "0.1.0"
+authors = ["Joel Dice <joel.dice@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+ipmpsc = { path = ".." }
+ipc-channel = "0.12"
+bincode = "1"
+serde = "1"
+serde_derive = "1"
+serde_bytes = "0.11"
+failure = "0.1"
