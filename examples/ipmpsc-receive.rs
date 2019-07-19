@@ -2,7 +2,7 @@
 
 use clap::{App, Arg};
 use failure::Error;
-use ipmpsc::Receiver;
+use ipmpsc::{Receiver, SharedRingBuffer};
 
 fn main() -> Result<(), Error> {
     let matches = App::new("ipmpsc-send")
@@ -25,7 +25,7 @@ fn main() -> Result<(), Error> {
         .get_matches();
 
     let map_file = matches.value_of("map file").unwrap();
-    let mut rx = Receiver::from_path(map_file, 32 * 1024)?;
+    let mut rx = Receiver::new(SharedRingBuffer::create(map_file, 32 * 1024)?);
     let zero_copy = matches.is_present("zero copy");
 
     println!(
