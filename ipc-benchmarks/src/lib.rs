@@ -40,7 +40,7 @@ mod tests {
     use super::*;
     use failure::Error;
     use ipc_channel::ipc;
-    use ipmpsc::{Receiver, Sender};
+    use ipmpsc::{Receiver, Sender, SharedRingBuffer};
     use std::{
         sync::{
             atomic::{AtomicBool, Ordering::SeqCst},
@@ -58,8 +58,10 @@ mod tests {
 
     #[bench]
     fn bench_ipmpsc(b: &mut Bencher) -> Result<(), Error> {
-        let (name, mut rx) = Receiver::temp_file(32 * 1024 * 1024)?;
-        let tx = Sender::from_path(&name)?;
+        let (name, buffer) = SharedRingBuffer::create_temp(32 * 1024 * 1024)?;
+        let mut rx = Receiver::new(buffer);
+        let buffer = SharedRingBuffer::open(&name)?;
+        let tx = Sender::new(buffer);
         let alive = Arc::new(AtomicBool::new(true));
 
         thread::spawn({
