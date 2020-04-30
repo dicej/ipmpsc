@@ -2,6 +2,10 @@
 
 Inter-Process Multiple Producer, Single Consumer Channels for Rust
 
+[![Crates.io](https://img.shields.io/crates/v/ipmpsc)](https://crates.io/crates/ipmpsc)
+[![Build Status](https://travis-ci.org/dicej/ipmpsc.svg?branch=master)](https://travis-ci.org/dicej/ipmpsc)
+[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE.md)
+
 ## Summary
 
 This library provides a type-safe, high-performance inter-process
