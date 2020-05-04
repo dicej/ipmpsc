@@ -10,6 +10,7 @@
 #![deny(warnings)]
 
 #[cfg(test)]
+#[allow(unused_imports)]
 #[macro_use]
 extern crate serde_derive;
 
