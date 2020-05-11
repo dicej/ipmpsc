@@ -12,7 +12,6 @@ edition = "2018"
 include = [ "Cargo.toml", "LICENSE.md", "README.md", "src/**/*", "examples/**/*" ]
 
 [dependencies]
-log = "0.4"
 serde = "1"
 bincode = "1"
 tempfile = "3"
