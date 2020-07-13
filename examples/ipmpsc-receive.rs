@@ -1,10 +1,9 @@
 #![deny(warnings)]
 
 use clap::{App, Arg};
-use failure::Error;
 use ipmpsc::{Receiver, SharedRingBuffer};
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = App::new("ipmpsc-send")
         .about("ipmpsc sender example")
         .version(env!("CARGO_PKG_VERSION"))

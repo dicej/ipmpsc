@@ -6,7 +6,7 @@ repository = "https://github.com/dicej/ipmpsc"
 documentation = "https://dicej.github.io/doc/ipmpsc"
 keywords = ["ipc", "shared"]
 license = "MIT"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["Joel Dice <joel.dice@gmail.com>"]
 edition = "2018"
 include = [ "Cargo.toml", "LICENSE.md", "README.md", "src/**/*", "examples/**/*" ]
@@ -17,10 +17,11 @@ bincode = "1"
 tempfile = "3"
 memmap = "0.7"
 libc = "0.2"
-failure = "0.1"
+thiserror = "1"
 serde_derive = "1"
 
 [dev-dependencies]
+anyhow = "1"
 proptest = "0.9"
 clap = "2"
 serde_bytes = "0.11"

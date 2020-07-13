@@ -1,11 +1,9 @@
 //! Inter-Process Multiple Producer, Single Consumer Channels for Rust
 //!
-//! This library provides a type-safe, high-performance inter-process
-//! channel implementation based on a shared memory ring buffer.  It
-//! uses [bincode](https://github.com/TyOverby/bincode) for
-//! (de)serialization, including zero-copy deserialization, making it
-//! ideal for messages with large `&str` or `&[u8]` fields.  And it
-//! has a name that rolls right off the tongue.
+//! This library provides a type-safe, high-performance inter-process channel implementation based on a shared
+//! memory ring buffer.  It uses [bincode](https://github.com/TyOverby/bincode) for (de)serialization, including
+//! zero-copy deserialization, making it ideal for messages with large `&str` or `&[u8]` fields.  And it has a name
+//! that rolls right off the tongue.
 
 #![deny(warnings)]
 
@@ -14,7 +12,6 @@
 #[macro_use]
 extern crate serde_derive;
 
-use failure::{format_err, Error};
 use memmap::MmapMut;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -29,6 +26,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tempfile::NamedTempFile;
+use thiserror::Error as ThisError;
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
@@ -42,27 +40,37 @@ const PTHREAD_PROCESS_SHARED: i32 = 1;
 #[cfg(not(target_os = "android"))]
 const PTHREAD_PROCESS_SHARED: i32 = libc::PTHREAD_PROCESS_SHARED;
 
-pub mod error {
-    use failure::Fail;
+#[derive(ThisError, Debug)]
+pub enum Error {
+    /// Error indicating that the caller has attempted to read more than one message from a given
+    /// [`ZeroCopyContext`](struct.ZeroCopyContext.html).
+    #[error("A ZeroCopyContext may only be used to receive one message")]
+    AlreadyReceived,
 
-    /// Error indicating that the caller has attempted to read more than
-    /// one message from a given [`ZeroCopyContext`](struct.ZeroCopyContext.html).
-    #[derive(Fail, Debug)]
-    #[fail(display = "A ZeroCopyContext may only be used to receive one message")]
-    pub struct AlreadyReceived;
+    /// Error indicating that the caller attempted to send a message of zero serialized size, which is not
+    /// supported.
+    #[error("Serialized size of message is zero")]
+    ZeroSizedMessage,
 
-    /// Error indicating that the caller attempted to send a message of
-    /// zero serialized size, which is not supported.
-    #[derive(Fail, Debug)]
-    #[fail(display = "Serialized size of message is zero")]
-    pub struct ZeroSizedMessage;
+    /// Error indicating that the caller attempted to send a message of serialized size greater than the ring
+    /// buffer capacity.
+    #[error("Serialized size of message is too large for ring buffer")]
+    MessageTooLarge,
 
-    /// Error indicating that the caller attempted to send a message of
-    /// serialized size greater than the ring buffer capacity.
-    #[derive(Fail, Debug)]
-    #[fail(display = "Serialized size of message is too large for ring buffer")]
-    pub struct MessageTooLarge;
+    /// Implementation-specific runtime failure (e.g. a libc mutex error).
+    #[error("{0}")]
+    Runtime(String),
+
+    /// Implementation-specific runtime I/O failure (e.g. filesystem error).
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    /// Wrapped bincode error encountered during (de)serialization.
+    #[error(transparent)]
+    Bincode(#[from] bincode::Error),
 }
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 macro_rules! nonzero {
     ($x:expr) => {{
@@ -70,7 +78,7 @@ macro_rules! nonzero {
         if x == 0 {
             Ok(())
         } else {
-            Err(format_err!("{} failed: {}", stringify!($x), x))
+            Err(Error::Runtime(format!("{} failed: {}", stringify!($x), x)))
         }
     }};
 }
@@ -84,7 +92,7 @@ struct Header {
 }
 
 impl Header {
-    fn init(&self) -> Result<(), Error> {
+    fn init(&self) -> Result<()> {
         unsafe {
             let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
             nonzero!(libc::pthread_mutexattr_init(attr.as_mut_ptr()))?;
@@ -111,14 +119,14 @@ impl Header {
         Ok(())
     }
 
-    fn lock(&self) -> Result<Lock, Error> {
+    fn lock(&self) -> Result<Lock> {
         unsafe {
             nonzero!(libc::pthread_mutex_lock(self.mutex.get()))?;
         }
         Ok(Lock(self))
     }
 
-    fn notify_all(&self) -> Result<(), Error> {
+    fn notify_all(&self) -> Result<()> {
         unsafe { nonzero!(libc::pthread_cond_broadcast(self.condition.get())) }
     }
 }
@@ -126,7 +134,7 @@ impl Header {
 struct Lock<'a>(&'a Header);
 
 impl<'a> Lock<'a> {
-    fn wait(&self) -> Result<(), Error> {
+    fn wait(&self) -> Result<()> {
         unsafe {
             nonzero!(libc::pthread_cond_wait(
                 self.0.condition.get(),
@@ -136,7 +144,7 @@ impl<'a> Lock<'a> {
     }
 
     #[allow(clippy::cast_lossless)]
-    fn timed_wait(&self, timeout: Duration) -> Result<(), Error> {
+    fn timed_wait(&self, timeout: Duration) -> Result<()> {
         let then = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -167,7 +175,7 @@ impl<'a> Drop for Lock<'a> {
     }
 }
 
-fn map(file: &File) -> Result<MmapMut, Error> {
+fn map(file: &File) -> Result<MmapMut> {
     unsafe {
         let map = MmapMut::map_mut(&file)?;
 
@@ -183,14 +191,11 @@ struct RingBuffer {
     _file: Option<NamedTempFile>,
 }
 
-/// Represents a file-backed shared memory ring buffer, suitable for
-/// constructing a [`Receiver`](struct.Receiver.html) or
-/// [`Sender`](struct.Sender.html).
+/// Represents a file-backed shared memory ring buffer, suitable for constructing a
+/// [`Receiver`](struct.Receiver.html) or [`Sender`](struct.Sender.html).
 ///
-/// Note that it is possible to create multiple
-/// [`SharedRingBuffer`](struct.SharedRingBuffer.html)s for a
-/// given path in a single process, but it is much more efficient
-/// to clone an exisiting instance than construct one from
+/// Note that it is possible to create multiple [`SharedRingBuffer`](struct.SharedRingBuffer.html)s for a given
+/// path in a single process, but it is much more efficient to clone an exisiting instance than construct one from
 /// scratch using one of the constructors.
 #[derive(Clone)]
 pub struct SharedRingBuffer {
@@ -202,19 +207,14 @@ unsafe impl Sync for SharedRingBuffer {}
 unsafe impl Send for SharedRingBuffer {}
 
 impl SharedRingBuffer {
-    /// Creates a new
-    /// [`SharedRingBuffer`](struct.SharedRingBuffer.html) backed by a
-    /// file with the specified name.
+    /// Creates a new [`SharedRingBuffer`](struct.SharedRingBuffer.html) backed by a file with the specified name.
     ///
-    /// The file will be created if it does not already exist or
-    /// truncated otherwise.
+    /// The file will be created if it does not already exist or truncated otherwise.
     ///
-    /// Once this function completes successfully, the same path may
-    /// be used to create one or more corresponding instances in other
-    /// processes using the
-    /// [`SharedRingBuffer::open`](struct.SharedRingBuffer.html#method.open)
+    /// Once this function completes successfully, the same path may be used to create one or more corresponding
+    /// instances in other processes using the [`SharedRingBuffer::open`](struct.SharedRingBuffer.html#method.open)
     /// method.
-    pub fn create(path: &str, size_in_bytes: u32) -> Result<SharedRingBuffer, Error> {
+    pub fn create(path: &str, size_in_bytes: u32) -> Result<SharedRingBuffer> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -232,16 +232,13 @@ impl SharedRingBuffer {
         })
     }
 
-    /// Creates a new [`SharedRingBuffer`](struct.SharedRingBuffer.html) backed by a
-    /// temporary file which will be deleted when the
-    /// [`SharedRingBuffer`](struct.SharedRingBuffer.html) is dropped.
+    /// Creates a new [`SharedRingBuffer`](struct.SharedRingBuffer.html) backed by a temporary file which will be
+    /// deleted when the [`SharedRingBuffer`](struct.SharedRingBuffer.html) is dropped.
     ///
-    /// The name of the file is returned along with the
-    /// [`SharedRingBuffer`](struct.SharedRingBuffer.html) and may be used to create
-    /// one or more corresponding instances in other processes using the
-    /// [`SharedRingBuffer::open`](struct.SharedRingBuffer.html#method.open)
-    /// method.
-    pub fn create_temp(size_in_bytes: u32) -> Result<(String, SharedRingBuffer), Error> {
+    /// The name of the file is returned along with the [`SharedRingBuffer`](struct.SharedRingBuffer.html) and may
+    /// be used to create one or more corresponding instances in other processes using the
+    /// [`SharedRingBuffer::open`](struct.SharedRingBuffer.html#method.open) method.
+    pub fn create_temp(size_in_bytes: u32) -> Result<(String, SharedRingBuffer)> {
         let file = NamedTempFile::new()?;
 
         file.as_file()
@@ -250,7 +247,7 @@ impl SharedRingBuffer {
         Ok((
             file.path()
                 .to_str()
-                .ok_or_else(|| format_err!("unable to represent path as string"))?
+                .ok_or_else(|| Error::Runtime("unable to represent path as string".into()))?
                 .to_owned(),
             SharedRingBuffer {
                 inner: Arc::new(UnsafeCell::new(RingBuffer {
@@ -261,15 +258,12 @@ impl SharedRingBuffer {
         ))
     }
 
-    /// Creates a new [`SharedRingBuffer`](struct.SharedRingBuffer.html) backed by a file with
-    /// the specified name.
+    /// Creates a new [`SharedRingBuffer`](struct.SharedRingBuffer.html) backed by a file with the specified name.
     ///
-    /// The file must already exist and have been initialized by a
-    /// call to
-    /// [`SharedRingBuffer::create`](struct.SharedRingBuffer.html#method.create)
-    /// or
+    /// The file must already exist and have been initialized by a call to
+    /// [`SharedRingBuffer::create`](struct.SharedRingBuffer.html#method.create) or
     /// [`SharedRingBuffer::create_temp`](struct.SharedRingBuffer.html#method.create_temp).
-    pub fn open(path: &str) -> Result<SharedRingBuffer, Error> {
+    pub fn open(path: &str) -> Result<SharedRingBuffer> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let map = unsafe { MmapMut::map_mut(&file)? };
 
@@ -286,21 +280,20 @@ impl SharedRingBuffer {
     }
 }
 
-/// Represents the receiving end of an inter-process channel, capable
-/// of receiving any message type implementing
+/// Represents the receiving end of an inter-process channel, capable of receiving any message type implementing
 /// [`serde::Deserialize`](https://docs.serde.rs/serde/trait.Deserialize.html).
 pub struct Receiver {
     buffer: SharedRingBuffer,
 }
 
 impl Receiver {
-    /// Constructs a [`Receiver`](struct.Receiver.html) from the
-    /// specified [`SharedRingBuffer`](struct.SharedRingBuffer.html)
+    /// Constructs a [`Receiver`](struct.Receiver.html) from the specified
+    /// [`SharedRingBuffer`](struct.SharedRingBuffer.html)
     pub fn new(buffer: SharedRingBuffer) -> Self {
         Self { buffer }
     }
 
-    fn seek(&self, position: u32) -> Result<(), Error> {
+    fn seek(&self, position: u32) -> Result<()> {
         let header = self.buffer.header();
         let _lock = header.lock()?;
         header.read.store(position, SeqCst);
@@ -309,9 +302,8 @@ impl Receiver {
 
     /// Attempt to read a message without blocking.
     ///
-    /// This will return `Ok(None)` if there are no messages
-    /// immediately available.
-    pub fn try_recv<T>(&self) -> Result<Option<T>, Error>
+    /// This will return `Ok(None)` if there are no messages immediately available.
+    pub fn try_recv<T>(&self) -> Result<Option<T>>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -324,7 +316,7 @@ impl Receiver {
         })
     }
 
-    fn try_recv_0<'a, T: Deserialize<'a>>(&'a self) -> Result<Option<(T, u32)>, Error> {
+    fn try_recv_0<'a, T: Deserialize<'a>>(&'a self) -> Result<Option<(T, u32)>> {
         let header = self.buffer.header();
         let map = unsafe { &(*self.buffer.inner.get()).map };
 
@@ -348,7 +340,7 @@ impl Receiver {
                     header.read.store(read, SeqCst);
                     header.notify_all()?;
                 } else {
-                    return Err(format_err!("corrupt ring buffer"));
+                    return Err(Error::Runtime("corrupt ring buffer".into()));
                 }
             } else {
                 break None;
@@ -356,9 +348,8 @@ impl Receiver {
         })
     }
 
-    /// Attempt to read a message, blocking if necessary until one
-    /// becomes available.
-    pub fn recv<T>(&self) -> Result<T, Error>
+    /// Attempt to read a message, blocking if necessary until one becomes available.
+    pub fn recv<T>(&self) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -366,9 +357,9 @@ impl Receiver {
             .map(Option::unwrap)
     }
 
-    /// Attempt to read a message, blocking for up to the specified
-    /// duration if necessary until one becomes available.
-    pub fn recv_timeout<T>(&self, timeout: Duration) -> Result<Option<T>, Error>
+    /// Attempt to read a message, blocking for up to the specified duration if necessary until one becomes
+    /// available.
+    pub fn recv_timeout<T>(&self, timeout: Duration) -> Result<Option<T>>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -383,29 +374,23 @@ impl Receiver {
         )
     }
 
-    /// Borrows this receiver for deserializing a message with
-    /// references that refer directly to this
-    /// [`Receiver`](struct.Receiver.html)'s ring buffer rather than
-    /// copying out of it.
+    /// Borrows this receiver for deserializing a message with references that refer directly to this
+    /// [`Receiver`](struct.Receiver.html)'s ring buffer rather than copying out of it.
     ///
-    /// Because those references refer directly to the ring buffer,
-    /// the read pointer cannot be advanced until the lifetime of
-    /// those references ends.
+    /// Because those references refer directly to the ring buffer, the read pointer cannot be advanced until the
+    /// lifetime of those references ends.
     ///
     /// To ensure the above, the following rules apply:
     ///
-    /// 1. The underlying [`Receiver`](struct.Receiver.html) cannot be
-    /// used while a [`ZeroCopyContext`](struct.ZeroCopyContext.html)
-    /// borrows it (enforced at compile time).
+    /// 1. The underlying [`Receiver`](struct.Receiver.html) cannot be used while a
+    /// [`ZeroCopyContext`](struct.ZeroCopyContext.html) borrows it (enforced at compile time).
     ///
-    /// 2. References in a message deserialized using a given
-    /// [`ZeroCopyContext`](struct.ZeroCopyContext.html) cannot
-    /// outlive that instance (enforced at compile time).
+    /// 2. References in a message deserialized using a given [`ZeroCopyContext`](struct.ZeroCopyContext.html)
+    /// cannot outlive that instance (enforced at compile time).
     ///
-    /// 3. A given [`ZeroCopyContext`](struct.ZeroCopyContext.html)
-    /// can only be used to deserialize a single message before it
-    /// must be discarded since the read pointer is advanced only when
-    /// the instance is dropped (enforced at run time).
+    /// 3. A given [`ZeroCopyContext`](struct.ZeroCopyContext.html) can only be used to deserialize a single
+    /// message before it must be discarded since the read pointer is advanced only when the instance is dropped
+    /// (enforced at run time).
     pub fn zero_copy_context(&mut self) -> ZeroCopyContext {
         ZeroCopyContext {
             receiver: self,
@@ -416,7 +401,7 @@ impl Receiver {
     fn recv_timeout_0<'a, T: Deserialize<'a>>(
         &'a self,
         timeout: Duration,
-    ) -> Result<Option<(T, u32)>, Error> {
+    ) -> Result<Option<(T, u32)>> {
         let mut deadline = None;
         loop {
             if let Some(value_and_position) = self.try_recv_0()? {
@@ -444,20 +429,15 @@ impl Receiver {
     }
 }
 
-/// Borrows a [`Receiver`](struct.Receiver.html) for the purpose of
-/// doing zero-copy deserialization of messages containing references.
+/// Borrows a [`Receiver`](struct.Receiver.html) for the purpose of doing zero-copy deserialization of messages
+/// containing references.
 ///
-/// An instance of this type may only be used to deserialize a single
-/// message before it is dropped because the
-/// [`Drop`](https://doc.rust-lang.org/std/ops/trait.Drop.html)
-/// implementation is what advances the ring buffer pointer.  Also,
-/// the borrowed [`Receiver`](struct.Receiver.html) may not be used
-/// directly while it is borrowed by a
-/// [`ZeroCopyContext`](struct.ZeroCopyContext.html).
+/// An instance of this type may only be used to deserialize a single message before it is dropped because the
+/// [`Drop`](https://doc.rust-lang.org/std/ops/trait.Drop.html) implementation is what advances the ring buffer
+/// pointer.  Also, the borrowed [`Receiver`](struct.Receiver.html) may not be used directly while it is borrowed
+/// by a [`ZeroCopyContext`](struct.ZeroCopyContext.html).
 ///
-/// Use
-/// [`Receiver::zero_copy_context`](struct.Receiver.html#method.zero_copy_context)
-/// to create an instance.
+/// Use [`Receiver::zero_copy_context`](struct.Receiver.html#method.zero_copy_context) to create an instance.
 pub struct ZeroCopyContext<'a> {
     receiver: &'a Receiver,
     position: Option<u32>,
@@ -466,13 +446,12 @@ pub struct ZeroCopyContext<'a> {
 impl<'a> ZeroCopyContext<'a> {
     /// Attempt to read a message without blocking.
     ///
-    /// This will return `Ok(None)` if there are no messages
-    /// immediately available.  It will return
-    /// `Err(Error::from(`[`error::AlreadyReceived`](error/struct.AlreadyReceived.html)`))`
-    /// if this instance has already been used to read a message.
-    pub fn try_recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<Option<T>, Error> {
+    /// This will return `Ok(None)` if there are no messages immediately available.  It will return
+    /// `Err(`[`Error::AlreadyReceived`](enum.Error.html#variant.AlreadyReceived)`))` if this instance has already
+    /// been used to read a message.
+    pub fn try_recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<Option<T>> {
         if self.position.is_some() {
-            Err(Error::from(error::AlreadyReceived))
+            Err(Error::AlreadyReceived)
         } else {
             Ok(
                 if let Some((value, position)) = self.receiver.try_recv_0()? {
@@ -485,29 +464,26 @@ impl<'a> ZeroCopyContext<'a> {
         }
     }
 
-    /// Attempt to read a message, blocking if necessary until one
-    /// becomes available.
+    /// Attempt to read a message, blocking if necessary until one becomes available.
     ///
-    /// This will return
-    /// `Err(Error::from(`[`error::AlreadyReceived`](error/struct.AlreadyReceived.html)`))`
-    /// if this instance has already been used to read a message.
-    pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T, Error> {
+    /// This will return `Err(`[`Error::AlreadyReceived`](enum.Error.html#variant.AlreadyReceived)`))` if this
+    /// instance has already been used to read a message.
+    pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T> {
         self.recv_timeout(Duration::from_secs(DECADE_SECS))
             .map(Option::unwrap)
     }
 
-    /// Attempt to read a message, blocking for up to the specified
-    /// duration if necessary until one becomes available.
+    /// Attempt to read a message, blocking for up to the specified duration if necessary until one becomes
+    /// available.
     ///
-    /// This will return
-    /// `Err(Error::from(`[`error::AlreadyReceived`](error/struct.AlreadyReceived.html)`))`
-    /// if this instance has already been used to read a message.
+    /// This will return `Err(`[`Error::AlreadyReceived`](enum.Error.html#variant.AlreadyReceived)`))` if this
+    /// instance has already been used to read a message.
     pub fn recv_timeout<'b, T: Deserialize<'b>>(
         &'b mut self,
         timeout: Duration,
-    ) -> Result<Option<T>, Error> {
+    ) -> Result<Option<T>> {
         if self.position.is_some() {
-            Err(Error::from(error::AlreadyReceived))
+            Err(Error::AlreadyReceived)
         } else {
             Ok(
                 if let Some((value, position)) = self.receiver.recv_timeout_0(timeout)? {
@@ -536,55 +512,50 @@ pub struct Sender {
 }
 
 impl Sender {
-    /// Constructs a [`Sender`](struct.Sender.html) from the
-    /// specified [`SharedRingBuffer`](struct.SharedRingBuffer.html)
+    /// Constructs a [`Sender`](struct.Sender.html) from the specified
+    /// [`SharedRingBuffer`](struct.SharedRingBuffer.html)
     pub fn new(buffer: SharedRingBuffer) -> Self {
         Self { buffer }
     }
 
-    /// Send the specified message, waiting for sufficient contiguous
-    /// space to become available in the ring buffer if necessary.
+    /// Send the specified message, waiting for sufficient contiguous space to become available in the ring buffer
+    /// if necessary.
     ///
-    /// The serialized size of the message must be greater than zero
-    /// or else this method will return
-    /// `Err(Error::from(`[`error::ZeroSizedMessage`](error/struct.ZeroSizedMessage.html)`))`.
-    /// If the serialized size is greater than the ring buffer
-    /// capacity, this method will return
-    /// `Err(Error::from(`[`error::MessageTooLarge`](error/struct.MessageTooLarge.html)`))`.
-    pub fn send(&self, value: &impl Serialize) -> Result<(), Error> {
+    /// The serialized size of the message must be greater than zero or else this method will return
+    /// `Err(`[`Error::ZeroSizedMessage`](enum.Error.html#variant.ZeroSizedMessage)`))`.  If the serialized size is
+    /// greater than the ring buffer capacity, this method will return
+    /// `Err(`[`Error::MessageTooLarge`](enum.Error.html#variant.MessageTooLarge)`))`.
+    pub fn send(&self, value: &impl Serialize) -> Result<()> {
         self.send_0(value, false)
     }
 
-    /// Send the specified message, waiting for the ring buffer to
-    /// become completely empty first.
+    /// Send the specified message, waiting for the ring buffer to become completely empty first.
     ///
-    /// This method is appropriate for sending time-sensitive messages
-    /// where buffering would introduce undesirable latency.
+    /// This method is appropriate for sending time-sensitive messages where buffering would introduce undesirable
+    /// latency.
     ///
-    /// The serialized size of the message must be greater than zero
-    /// or else this method will return
-    /// `Err(Error::from(`[`error::ZeroSizedMessage`](error/struct.ZeroSizedMessage.html)`))`.
-    /// If the serialized size is greater than the ring buffer
-    /// capacity, this method will return
-    /// `Err(Error::from(`[`error::MessageTooLarge`](error/struct.MessageTooLarge.html)`))`.
-    pub fn send_when_empty(&self, value: &impl Serialize) -> Result<(), Error> {
+    /// The serialized size of the message must be greater than zero or else this method will return
+    /// `Err(`[`error::ZeroSizedMessage`](struct.Error.html#variant.ZeroSizedMessage)`))`.  If the serialized size
+    /// is greater than the ring buffer capacity, this method will return
+    /// `Err(`[`Error::MessageTooLarge`](struct.Error.html#variant.MessageTooLarge)`))`.
+    pub fn send_when_empty(&self, value: &impl Serialize) -> Result<()> {
         self.send_0(value, true)
     }
 
-    fn send_0(&self, value: &impl Serialize, wait_until_empty: bool) -> Result<(), Error> {
+    fn send_0(&self, value: &impl Serialize, wait_until_empty: bool) -> Result<()> {
         let header = self.buffer.header();
         let map = unsafe { &mut (*self.buffer.inner.get()).map };
 
         let size = bincode::serialized_size(value)? as u32;
 
         if size == 0 {
-            return Err(Error::from(error::ZeroSizedMessage));
+            return Err(Error::ZeroSizedMessage);
         }
 
         let map_len = map.len();
 
         if (BEGINNING + size + 8) as usize > map_len {
-            return Err(Error::from(error::MessageTooLarge));
+            return Err(Error::MessageTooLarge);
         }
 
         let lock = header.lock()?;
@@ -630,6 +601,7 @@ impl Sender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{anyhow, Result};
     use proptest::{arbitrary::any, collection::vec, prop_assume, proptest, strategy::Strategy};
     use std::thread;
 
@@ -640,12 +612,12 @@ mod tests {
     }
 
     impl Case {
-        fn run(&self) -> Result<(), Error> {
+        fn run(&self) -> Result<()> {
             let (name, buffer) = SharedRingBuffer::create_temp(self.channel_size)?;
             let rx = Receiver::new(buffer);
 
             let expected = self.data.clone();
-            let receiver_thread = thread::spawn(move || -> Result<(), Error> {
+            let receiver_thread = thread::spawn(move || -> Result<()> {
                 for item in &expected {
                     let received = rx.recv::<Vec<u8>>()?;
                     assert_eq!(item, &received);
@@ -660,9 +632,7 @@ mod tests {
                 tx.send(item)?;
             }
 
-            receiver_thread
-                .join()
-                .map_err(|e| format_err!("{:?}", e))??;
+            receiver_thread.join().map_err(|e| anyhow!("{:?}", e))??;
 
             Ok(())
         }
@@ -676,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_case() -> Result<(), Error> {
+    fn simple_case() -> Result<()> {
         Case {
             channel_size: 1024,
             data: (0..1024)
@@ -687,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_copy() -> Result<(), Error> {
+    fn zero_copy() -> Result<()> {
         #[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
         struct Foo<'a> {
             borrowed_str: &'a str,
