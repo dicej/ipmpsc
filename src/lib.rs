@@ -559,8 +559,9 @@ impl Sender {
         }
 
         let lock = header.lock()?;
-        let mut write = header.write.load(SeqCst);
+        let mut write;
         loop {
+            write = header.write.load(SeqCst);
             let read = header.read.load(SeqCst);
 
             if write == read || (write > read && !wait_until_empty) {
@@ -609,6 +610,7 @@ mod tests {
     struct Case {
         channel_size: u32,
         data: Vec<Vec<u8>>,
+        sender_count: u32,
     }
 
     impl Case {
@@ -616,20 +618,51 @@ mod tests {
             let (name, buffer) = SharedRingBuffer::create_temp(self.channel_size)?;
             let rx = Receiver::new(buffer);
 
-            let expected = self.data.clone();
-            let receiver_thread = thread::spawn(move || -> Result<()> {
-                for item in &expected {
-                    let received = rx.recv::<Vec<u8>>()?;
-                    assert_eq!(item, &received);
-                }
+            let receiver_thread = if self.sender_count == 1 {
+                // Only one sender means we can expect to receive in a predictable order:
+                let expected = self.data.clone();
+                thread::spawn(move || -> Result<()> {
+                    for item in &expected {
+                        let received = rx.recv::<Vec<u8>>()?;
+                        assert_eq!(item, &received);
+                    }
 
-                Ok(())
-            });
+                    Ok(())
+                })
+            } else {
+                // Multiple senders mean we'll receive in an unpredictable order, so just verify we receive the
+                // expected number of messages:
+                let expected = self.data.len() * self.sender_count as usize;
+                thread::spawn(move || -> Result<()> {
+                    for _ in 0..expected {
+                        rx.recv::<Vec<u8>>()?;
+                    }
+
+                    Ok(())
+                })
+            };
 
             let tx = Sender::new(SharedRingBuffer::open(&name)?);
 
-            for item in &self.data {
-                tx.send(item)?;
+            let data = Arc::new(self.data.clone());
+            let sender_threads = (0..self.sender_count)
+                .map(move |_| {
+                    thread::spawn({
+                        let tx = tx.clone();
+                        let data = data.clone();
+                        move || -> Result<()> {
+                            for item in data.as_ref() {
+                                tx.send(item)?;
+                            }
+
+                            Ok(())
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for thread in sender_threads {
+                thread.join().map_err(|e| anyhow!("{:?}", e))??;
             }
 
             receiver_thread.join().map_err(|e| anyhow!("{:?}", e))??;
@@ -639,9 +672,14 @@ mod tests {
     }
 
     fn arb_case() -> impl Strategy<Value = Case> {
-        (32_u32..1024).prop_flat_map(|channel_size| {
-            vec(vec(any::<u8>(), 0..(channel_size as usize - 24)), 1..1024)
-                .prop_map(move |data| Case { channel_size, data })
+        ((32_u32..1024), (1_u32..5)).prop_flat_map(|(channel_size, sender_count)| {
+            vec(vec(any::<u8>(), 0..(channel_size as usize - 24)), 1..1024).prop_map(move |data| {
+                Case {
+                    channel_size,
+                    data,
+                    sender_count,
+                }
+            })
         })
     }
 
@@ -652,6 +690,7 @@ mod tests {
             data: (0..1024)
                 .map(|_| (0_u8..101).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
+            sender_count: 1,
         }
         .run()
     }
