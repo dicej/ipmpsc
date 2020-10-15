@@ -7,11 +7,6 @@
 
 #![deny(warnings)]
 
-#[cfg(test)]
-#[allow(unused_imports)]
-#[macro_use]
-extern crate serde_derive;
-
 use memmap::MmapMut;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,6 +22,10 @@ use std::{
 };
 use tempfile::NamedTempFile;
 use thiserror::Error as ThisError;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub const GIT_COMMIT_SHA_SHORT: &str = env!("VERGEN_SHA_SHORT");
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
