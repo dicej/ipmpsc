@@ -8,17 +8,17 @@
 #![deny(warnings)]
 
 use memmap::MmapMut;
+use native::Header;
 use serde::{Deserialize, Serialize};
 use std::{
     cell::UnsafeCell,
     fs::{File, OpenOptions},
-    mem::{self, MaybeUninit},
-    os::raw::c_long,
+    mem,
     sync::{
         atomic::{AtomicU32, Ordering::SeqCst},
         Arc,
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
 use thiserror::Error as ThisError;
@@ -30,14 +30,6 @@ pub const GIT_COMMIT_SHA_SHORT: &str = env!("VERGEN_SHA_SHORT");
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
 const DECADE_SECS: u64 = 60 * 60 * 24 * 365 * 10;
-
-// libc::PTHREAD_PROCESS_SHARED doesn't exist for Android for some
-// reason, so we need to declare it ourselves:
-#[cfg(target_os = "android")]
-const PTHREAD_PROCESS_SHARED: i32 = 1;
-
-#[cfg(not(target_os = "android"))]
-const PTHREAD_PROCESS_SHARED: i32 = libc::PTHREAD_PROCESS_SHARED;
 
 #[derive(ThisError, Debug)]
 pub enum Error {
@@ -71,105 +63,164 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-macro_rules! nonzero {
-    ($x:expr) => {{
-        let x = $x;
-        if x == 0 {
+#[cfg(unix)]
+mod native {
+    use super::*;
+    use std::{mem::MaybeUninit, os::raw::c_long, time::SystemTime};
+
+    // libc::PTHREAD_PROCESS_SHARED doesn't exist for Android for some
+    // reason, so we need to declare it ourselves:
+    #[cfg(target_os = "android")]
+    const PTHREAD_PROCESS_SHARED: i32 = 1;
+
+    #[cfg(not(target_os = "android"))]
+    const PTHREAD_PROCESS_SHARED: i32 = libc::PTHREAD_PROCESS_SHARED;
+
+    macro_rules! nonzero {
+        ($x:expr) => {{
+            let x = $x;
+            if x == 0 {
+                Ok(())
+            } else {
+                Err(Error::Runtime(format!("{} failed: {}", stringify!($x), x)))
+            }
+        }};
+    }
+
+    #[repr(C)]
+    pub struct Header {
+        mutex: UnsafeCell<libc::pthread_mutex_t>,
+        condition: UnsafeCell<libc::pthread_cond_t>,
+        pub read: AtomicU32,
+        pub write: AtomicU32,
+    }
+
+    impl Header {
+        pub fn init(&self) -> Result<()> {
+            unsafe {
+                let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
+                nonzero!(libc::pthread_mutexattr_init(attr.as_mut_ptr()))?;
+                nonzero!(libc::pthread_mutexattr_setpshared(
+                    attr.as_mut_ptr(),
+                    PTHREAD_PROCESS_SHARED
+                ))?;
+                nonzero!(libc::pthread_mutex_init(self.mutex.get(), attr.as_ptr()))?;
+                nonzero!(libc::pthread_mutexattr_destroy(attr.as_mut_ptr()))?;
+
+                let mut attr = MaybeUninit::<libc::pthread_condattr_t>::uninit();
+                nonzero!(libc::pthread_condattr_init(attr.as_mut_ptr()))?;
+                nonzero!(libc::pthread_condattr_setpshared(
+                    attr.as_mut_ptr(),
+                    PTHREAD_PROCESS_SHARED
+                ))?;
+                nonzero!(libc::pthread_cond_init(self.condition.get(), attr.as_ptr()))?;
+                nonzero!(libc::pthread_condattr_destroy(attr.as_mut_ptr()))?;
+            }
+
+            self.read.store(BEGINNING, SeqCst);
+            self.write.store(BEGINNING, SeqCst);
+
             Ok(())
-        } else {
-            Err(Error::Runtime(format!("{} failed: {}", stringify!($x), x)))
-        }
-    }};
-}
-
-#[repr(C)]
-struct Header {
-    mutex: UnsafeCell<libc::pthread_mutex_t>,
-    condition: UnsafeCell<libc::pthread_cond_t>,
-    read: AtomicU32,
-    write: AtomicU32,
-}
-
-impl Header {
-    fn init(&self) -> Result<()> {
-        unsafe {
-            let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
-            nonzero!(libc::pthread_mutexattr_init(attr.as_mut_ptr()))?;
-            nonzero!(libc::pthread_mutexattr_setpshared(
-                attr.as_mut_ptr(),
-                PTHREAD_PROCESS_SHARED
-            ))?;
-            nonzero!(libc::pthread_mutex_init(self.mutex.get(), attr.as_ptr()))?;
-            nonzero!(libc::pthread_mutexattr_destroy(attr.as_mut_ptr()))?;
-
-            let mut attr = MaybeUninit::<libc::pthread_condattr_t>::uninit();
-            nonzero!(libc::pthread_condattr_init(attr.as_mut_ptr()))?;
-            nonzero!(libc::pthread_condattr_setpshared(
-                attr.as_mut_ptr(),
-                PTHREAD_PROCESS_SHARED
-            ))?;
-            nonzero!(libc::pthread_cond_init(self.condition.get(), attr.as_ptr()))?;
-            nonzero!(libc::pthread_condattr_destroy(attr.as_mut_ptr()))?;
         }
 
-        self.read.store(BEGINNING, SeqCst);
-        self.write.store(BEGINNING, SeqCst);
-
-        Ok(())
-    }
-
-    fn lock(&self) -> Result<Lock> {
-        unsafe {
-            nonzero!(libc::pthread_mutex_lock(self.mutex.get()))?;
+        pub fn lock(&self) -> Result<Lock> {
+            unsafe {
+                nonzero!(libc::pthread_mutex_lock(self.mutex.get()))?;
+            }
+            Ok(Lock(self))
         }
-        Ok(Lock(self))
-    }
 
-    fn notify_all(&self) -> Result<()> {
-        unsafe { nonzero!(libc::pthread_cond_broadcast(self.condition.get())) }
-    }
-}
-
-struct Lock<'a>(&'a Header);
-
-impl<'a> Lock<'a> {
-    fn wait(&self) -> Result<()> {
-        unsafe {
-            nonzero!(libc::pthread_cond_wait(
-                self.0.condition.get(),
-                self.0.mutex.get()
-            ))
+        pub fn notify_all(&self) -> Result<()> {
+            unsafe { nonzero!(libc::pthread_cond_broadcast(self.condition.get())) }
         }
     }
 
-    #[allow(clippy::cast_lossless)]
-    fn timed_wait(&self, timeout: Duration) -> Result<()> {
-        let then = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            + timeout;
+    pub struct Lock<'a>(&'a Header);
 
-        let then = libc::timespec {
-            tv_sec: then.as_secs() as libc::time_t,
-            tv_nsec: then.subsec_nanos() as c_long,
-        };
+    impl<'a> Lock<'a> {
+        pub fn wait(&self) -> Result<()> {
+            unsafe {
+                nonzero!(libc::pthread_cond_wait(
+                    self.0.condition.get(),
+                    self.0.mutex.get()
+                ))
+            }
+        }
 
-        let timeout_ok = |result| if result == libc::ETIMEDOUT { 0 } else { result };
+        #[allow(clippy::cast_lossless)]
+        pub fn timed_wait(&self, timeout: Duration) -> Result<()> {
+            let then = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                + timeout;
 
-        unsafe {
-            nonzero!(timeout_ok(libc::pthread_cond_timedwait(
-                self.0.condition.get(),
-                self.0.mutex.get(),
-                &then
-            )))
+            let then = libc::timespec {
+                tv_sec: then.as_secs() as libc::time_t,
+                tv_nsec: then.subsec_nanos() as c_long,
+            };
+
+            let timeout_ok = |result| if result == libc::ETIMEDOUT { 0 } else { result };
+
+            unsafe {
+                nonzero!(timeout_ok(libc::pthread_cond_timedwait(
+                    self.0.condition.get(),
+                    self.0.mutex.get(),
+                    &then
+                )))
+            }
+        }
+    }
+
+    impl<'a> Drop for Lock<'a> {
+        fn drop(&mut self) {
+            unsafe {
+                libc::pthread_mutex_unlock(self.0.mutex.get());
+            }
         }
     }
 }
 
-impl<'a> Drop for Lock<'a> {
-    fn drop(&mut self) {
-        unsafe {
-            libc::pthread_mutex_unlock(self.0.mutex.get());
+#[cfg(windows)]
+mod native {
+    use super::*;
+
+    #[repr(C)]
+    pub struct Header {
+        // todo
+        pub read: AtomicU32,
+        pub write: AtomicU32,
+    }
+
+    impl Header {
+        pub fn init(&self) -> Result<()> {
+            todo!()
+        }
+
+        pub fn lock(&self) -> Result<Lock> {
+            todo!()
+        }
+
+        pub fn notify_all(&self) -> Result<()> {
+            todo!()
+        }
+    }
+
+    pub struct Lock<'a>(&'a Header);
+
+    impl<'a> Lock<'a> {
+        pub fn wait(&self) -> Result<()> {
+            todo!()
+        }
+
+        pub fn timed_wait(&self, timeout: Duration) -> Result<()> {
+            let _ = timeout;
+            todo!()
+        }
+    }
+
+    impl<'a> Drop for Lock<'a> {
+        fn drop(&mut self) {
+            todo!()
         }
     }
 }
