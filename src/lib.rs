@@ -8,7 +8,7 @@
 #![deny(warnings)]
 
 use memmap::MmapMut;
-use native::{Buffer, Header, View};
+use os::{Buffer, Header, View};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::UnsafeCell,
@@ -24,7 +24,7 @@ use thiserror::Error as ThisError;
 mod posix;
 
 #[cfg(unix)]
-use posix as native;
+use posix as os;
 
 #[cfg(windows)]
 mod bitmask;
@@ -33,7 +33,7 @@ mod bitmask;
 mod windows;
 
 #[cfg(windows)]
-use windows as native;
+use windows as os;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -208,41 +208,35 @@ impl Receiver {
     }
 
     fn try_recv_0<'a, T: Deserialize<'a>>(&'a self) -> Result<Option<(T, u32)>> {
-        let result;
+        let buffer = self.0 .0.buffer();
+        let map = buffer.map();
 
-        {
-            let buffer = self.0 .0.buffer();
-            let map = buffer.map();
+        let mut read = buffer.header().read.load(SeqCst);
+        let write = buffer.header().write.load(SeqCst);
 
-            let mut read = buffer.header().read.load(SeqCst);
-            let write = buffer.header().write.load(SeqCst);
-
-            result = loop {
-                if write != read {
-                    let slice = map.as_ref();
-                    let start = read + 4;
-                    let size = bincode::deserialize::<u32>(&slice[read as usize..start as usize])?;
-                    if size > 0 {
-                        let end = start + size;
-                        break Ok(Some((
-                            bincode::deserialize(&slice[start as usize..end as usize])?,
-                            end,
-                        )));
-                    } else if write < read {
-                        read = BEGINNING;
-                        let mut lock = buffer.lock()?;
-                        buffer.header().read.store(read, SeqCst);
-                        lock.notify_all()?;
-                    } else {
-                        break Err(Error::Runtime("corrupt ring buffer".into()));
-                    }
+        Ok(loop {
+            if write != read {
+                let slice = map.as_ref();
+                let start = read + 4;
+                let size = bincode::deserialize::<u32>(&slice[read as usize..start as usize])?;
+                if size > 0 {
+                    let end = start + size;
+                    break Some((
+                        bincode::deserialize(&slice[start as usize..end as usize])?,
+                        end,
+                    ));
+                } else if write < read {
+                    read = BEGINNING;
+                    let mut lock = buffer.lock()?;
+                    buffer.header().read.store(read, SeqCst);
+                    lock.notify_all()?;
                 } else {
-                    break Ok(None);
+                    return Err(Error::Runtime("corrupt ring buffer".into()));
                 }
-            };
-        }
-
-        result
+            } else {
+                break None;
+            }
+        })
     }
 
     /// Attempt to read a message, blocking if necessary until one becomes available.
