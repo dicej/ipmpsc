@@ -37,8 +37,8 @@ receiver will receive messages from any of them.
 [serde_bytes](https://github.com/serde-rs/bytes), is capable of supporting very
 high bandwidth, low latency transfers (e.g. uncompressed video frames).
 
-See the ipc-benchmarks sub-crate for a few simple benchmarks that compare
-`ipmpsc` to `ipc_channel`'s low- and high-level interfaces.  Here are the
+See the ipc-benchmarks subcrate for a few simple benchmarks that compare
+`ipmpsc` to `ipc_channel`'s high- and low-level interfaces.  Here are the
 results from my Ubuntu laptop:
 
 ```
