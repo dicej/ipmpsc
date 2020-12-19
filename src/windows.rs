@@ -173,21 +173,20 @@ impl Buffer {
             semaphores: Mutex::new([ptr::null_mut(); BitMask::capacity() as usize]),
         };
 
-        unsafe {
-            let mutex_string = format!("{}-mutex", buffer.path);
-            let mutex_name = CString::new(mutex_string.clone())
-                .expect("should not fail -- null characters were replaced earlier");
+        let mutex_string = format!("{}-mutex", buffer.path);
+        let mutex_name = CString::new(mutex_string.clone())
+            .expect("should not fail -- null characters were replaced earlier");
 
-            buffer.mutex =
-                synchapi::CreateMutexA(ptr::null_mut(), minwindef::FALSE, mutex_name.as_ptr());
+        buffer.mutex = unsafe {
+            synchapi::CreateMutexA(ptr::null_mut(), minwindef::FALSE, mutex_name.as_ptr())
+        };
 
-            if buffer.mutex.is_null() {
-                return Err(Error::Runtime(format!(
-                    "CreateMutex for {} failed: {}",
-                    mutex_string,
-                    get_last_error()
-                )));
-            }
+        if buffer.mutex.is_null() {
+            return Err(Error::Runtime(format!(
+                "CreateMutex for {} failed: {}",
+                mutex_string,
+                get_last_error()
+            )));
         }
 
         Ok(buffer)
@@ -202,10 +201,9 @@ impl Buffer {
             let semaphore_name = CString::new(semaphore_string.clone())
                 .expect("should not fail -- null characters were replaced earlier");
 
-            unsafe {
-                semaphores[index] =
-                    winbase::CreateSemaphoreA(ptr::null_mut(), 0, 1, semaphore_name.as_ptr());
-            }
+            semaphores[index] = unsafe {
+                winbase::CreateSemaphoreA(ptr::null_mut(), 0, 1, semaphore_name.as_ptr())
+            };
 
             if semaphores[index].is_null() {
                 return Err(Error::Runtime(format!(
@@ -241,15 +239,13 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        unsafe {
-            if !self.mutex.is_null() {
-                handleapi::CloseHandle(self.mutex);
-            }
+        if !self.mutex.is_null() {
+            unsafe { handleapi::CloseHandle(self.mutex) };
+        }
 
-            for &semaphore in self.semaphores.lock().unwrap().iter() {
-                if !semaphore.is_null() {
-                    handleapi::CloseHandle(semaphore);
-                }
+        for &semaphore in self.semaphores.lock().unwrap().iter() {
+            if !semaphore.is_null() {
+                unsafe { handleapi::CloseHandle(semaphore) };
             }
         }
     }
@@ -262,12 +258,10 @@ pub struct Lock<'a> {
 
 impl<'a> Lock<'a> {
     pub fn try_new(buffer: &Buffer) -> Result<Lock> {
-        unsafe {
-            success!(
-                winbase::WAIT_OBJECT_0
-                    == synchapi::WaitForSingleObject(buffer.mutex, winbase::INFINITE)
-            )?;
-        }
+        success!(
+            winbase::WAIT_OBJECT_0
+                == unsafe { synchapi::WaitForSingleObject(buffer.mutex, winbase::INFINITE) }
+        )?;
 
         Ok(Lock {
             locked: true,
@@ -276,35 +270,29 @@ impl<'a> Lock<'a> {
     }
 
     fn do_wait(&mut self, view: &View, milliseconds: ULONG) -> Result<()> {
-        unsafe {
-            let index = view.index;
+        let index = view.index;
 
-            *self.waiters() = self.waiters().set(index);
+        *self.waiters() = self.waiters().set(index);
 
-            success!(minwindef::TRUE == synchapi::ReleaseMutex(self.buffer.mutex))?;
+        success!(minwindef::TRUE == unsafe { synchapi::ReleaseMutex(self.buffer.mutex) })?;
 
-            self.locked = false;
+        self.locked = false;
 
-            let _ = milliseconds;
+        let _ = milliseconds;
 
-            let result;
-            success!(matches!(
-                {
-                    result = synchapi::WaitForSingleObject(self.buffer.semaphore(index)?, 10000);
-                    result
-                },
-                winbase::WAIT_OBJECT_0 | winerror::WAIT_TIMEOUT
-            ))?;
+        success!(matches!(
+            unsafe { synchapi::WaitForSingleObject(self.buffer.semaphore(index)?, 10000) },
+            winbase::WAIT_OBJECT_0 | winerror::WAIT_TIMEOUT
+        ))?;
 
-            success!(
-                winbase::WAIT_OBJECT_0
-                    == synchapi::WaitForSingleObject(self.buffer.mutex, winbase::INFINITE)
-            )?;
+        success!(
+            winbase::WAIT_OBJECT_0
+                == unsafe { synchapi::WaitForSingleObject(self.buffer.mutex, winbase::INFINITE) }
+        )?;
 
-            self.locked = true;
+        self.locked = true;
 
-            *self.waiters() = self.waiters().clear(index);
-        }
+        *self.waiters() = self.waiters().clear(index);
 
         Ok(())
     }
@@ -327,24 +315,24 @@ impl<'a> Lock<'a> {
     }
 
     pub fn notify_all(&mut self) -> Result<()> {
-        unsafe {
-            let waiters = *self.waiters();
+        let waiters = *self.waiters();
 
-            for index in waiters.ones() {
-                if minwindef::FALSE
-                    == synchapi::ReleaseSemaphore(self.buffer.semaphore(index)?, 1, ptr::null_mut())
-                {
-                    return Err(Error::Runtime(format!(
-                        "ReleaseSemaphore failed: {}",
-                        get_last_error()
-                    )));
+        for index in waiters.ones() {
+            if minwindef::FALSE
+                == unsafe {
+                    synchapi::ReleaseSemaphore(self.buffer.semaphore(index)?, 1, ptr::null_mut())
                 }
+            {
+                return Err(Error::Runtime(format!(
+                    "ReleaseSemaphore failed: {}",
+                    get_last_error()
+                )));
             }
-
-            *self.waiters() = BitMask::default();
-
-            Ok(())
         }
+
+        *self.waiters() = BitMask::default();
+
+        Ok(())
     }
 
     fn waiters(&mut self) -> &mut BitMask {
@@ -359,9 +347,7 @@ impl<'a> Lock<'a> {
 impl<'a> Drop for Lock<'a> {
     fn drop(&mut self) {
         if self.locked {
-            unsafe {
-                synchapi::ReleaseMutex(self.buffer.mutex);
-            }
+            unsafe { synchapi::ReleaseMutex(self.buffer.mutex) };
         }
     }
 }
