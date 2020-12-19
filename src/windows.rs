@@ -175,7 +175,8 @@ impl Buffer {
 
         unsafe {
             let mutex_string = format!("{}-mutex", buffer.path);
-            let mutex_name = CString::new(mutex_string.clone())?;
+            let mutex_name = CString::new(mutex_string.clone())
+                .expect("should not fail -- null characters were replaced earlier");
 
             buffer.mutex =
                 synchapi::CreateMutexA(ptr::null_mut(), minwindef::FALSE, mutex_name.as_ptr());
@@ -198,7 +199,8 @@ impl Buffer {
 
         if semaphores[index].is_null() {
             let semaphore_string = format!("{}-semaphore-{}", self.path, index);
-            let semaphore_name = CString::new(semaphore_string.clone())?;
+            let semaphore_name = CString::new(semaphore_string.clone())
+                .expect("should not fail -- null characters were replaced earlier");
 
             unsafe {
                 semaphores[index] =

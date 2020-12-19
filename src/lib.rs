@@ -66,10 +66,6 @@ pub enum Error {
     #[error("{0}")]
     Runtime(String),
 
-    /// Indicates the provided path contains null characters.
-    #[error(transparent)]
-    NulError(#[from] std::ffi::NulError),
-
     /// Implementation-specific runtime I/O failure (e.g. filesystem error).
     #[error(transparent)]
     Io(#[from] std::io::Error),
