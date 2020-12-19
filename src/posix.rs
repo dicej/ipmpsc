@@ -144,10 +144,8 @@ impl<'a> Lock<'a> {
     }
 
     #[allow(clippy::cast_lossless)]
-    pub fn timed_wait(&mut self, view: &View, timeout: Duration) -> Result<()> {
-        if timeout == crate::forever() {
-            self.wait(view)
-        } else {
+    pub fn timed_wait(&mut self, view: &View, timeout: Option<Duration>) -> Result<()> {
+        if let Some(timeout) = timeout {
             let then = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
@@ -167,6 +165,8 @@ impl<'a> Lock<'a> {
                     &then
                 )))
             }
+        } else {
+            self.wait(view)
         }
     }
 }

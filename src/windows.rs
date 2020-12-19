@@ -301,17 +301,17 @@ impl<'a> Lock<'a> {
         self.do_wait(view, winbase::INFINITE)
     }
 
-    pub fn timed_wait(&mut self, view: &View, timeout: Duration) -> Result<()> {
-        self.do_wait(
-            view,
-            if timeout == crate::forever() {
-                winbase::INFINITE
-            } else {
+    pub fn timed_wait(&mut self, view: &View, timeout: Option<Duration>) -> Result<()> {
+        if let Some(timeout) = timeout {
+            self.do_wait(
+                view,
                 timeout.as_millis().try_into().map_err(|_| {
                     Error::Runtime("unable to represent timeout in milliseconds as ULONG".into())
-                })?
-            },
-        )
+                })?,
+            )
+        } else {
+            self.wait(view)
+        }
     }
 
     pub fn notify_all(&mut self) -> Result<()> {

@@ -77,10 +77,6 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn forever() -> Duration {
-    Duration::from_secs(u64::MAX)
-}
-
 fn map(file: &File) -> Result<MmapMut> {
     unsafe {
         let map = MmapMut::map_mut(&file)?;
@@ -244,7 +240,11 @@ impl Receiver {
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.recv_timeout(forever()).map(Option::unwrap)
+        let (value, position) = self.recv_timeout_0(None)?.unwrap();
+
+        self.seek(position)?;
+
+        Ok(value)
     }
 
     /// Attempt to read a message, blocking for up to the specified duration if necessary until one becomes
@@ -254,7 +254,7 @@ impl Receiver {
         T: for<'de> Deserialize<'de>,
     {
         Ok(
-            if let Some((value, position)) = self.recv_timeout_0(timeout)? {
+            if let Some((value, position)) = self.recv_timeout_0(Some(timeout))? {
                 self.seek(position)?;
 
                 Some(value)
@@ -290,7 +290,7 @@ impl Receiver {
 
     fn recv_timeout_0<'a, T: Deserialize<'a>>(
         &'a self,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<Option<(T, u32)>> {
         let mut deadline = None;
         loop {
@@ -301,25 +301,14 @@ impl Receiver {
             let buffer = self.0 .0.buffer();
 
             let mut now = Instant::now();
-            deadline = deadline.or_else(|| {
-                if timeout == forever() {
-                    None
-                } else {
-                    Some(now + timeout)
-                }
-            });
+            deadline = deadline.or_else(|| timeout.map(|timeout| now + timeout));
 
             let read = buffer.header().read.load(SeqCst);
 
             let mut lock = buffer.lock()?;
             while read == buffer.header().write.load(SeqCst) {
                 if deadline.map(|deadline| deadline > now).unwrap_or(true) {
-                    lock.timed_wait(
-                        &self.0 .0,
-                        deadline
-                            .map(|deadline| deadline - now)
-                            .unwrap_or_else(forever),
-                    )?;
+                    lock.timed_wait(&self.0 .0, deadline.map(|deadline| deadline - now))?;
 
                     now = Instant::now();
                 } else {
@@ -370,7 +359,11 @@ impl<'a> ZeroCopyContext<'a> {
     /// This will return `Err(`[`Error::AlreadyReceived`](enum.Error.html#variant.AlreadyReceived)`))` if this
     /// instance has already been used to read a message.
     pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T> {
-        self.recv_timeout(forever()).map(Option::unwrap)
+        let (value, position) = self.receiver.recv_timeout_0(None)?.unwrap();
+
+        self.position = Some(position);
+
+        Ok(value)
     }
 
     /// Attempt to read a message, blocking for up to the specified duration if necessary until one becomes
@@ -386,7 +379,7 @@ impl<'a> ZeroCopyContext<'a> {
             Err(Error::AlreadyReceived)
         } else {
             Ok(
-                if let Some((value, position)) = self.receiver.recv_timeout_0(timeout)? {
+                if let Some((value, position)) = self.receiver.recv_timeout_0(Some(timeout))? {
                     self.position = Some(position);
                     Some(value)
                 } else {
