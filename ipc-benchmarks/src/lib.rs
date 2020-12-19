@@ -1,8 +1,8 @@
 #![feature(test)]
 
-#[macro_use]
-extern crate serde_derive;
 extern crate test;
+
+use serde_derive::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct YuvFrameInfo {
@@ -38,7 +38,7 @@ pub struct OwnedYuvFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use failure::Error;
+    use anyhow::Result;
     use ipc_channel::ipc;
     use ipmpsc::{Receiver, Sender, SharedRingBuffer};
     use std::{
@@ -57,7 +57,7 @@ mod tests {
     const V_STRIDE: usize = WIDTH / 2;
 
     #[bench]
-    fn bench_ipmpsc(b: &mut Bencher) -> Result<(), Error> {
+    fn bench_ipmpsc(b: &mut Bencher) -> Result<()> {
         let (name, buffer) = SharedRingBuffer::create_temp(32 * 1024 * 1024)?;
         let mut rx = Receiver::new(buffer);
         let buffer = SharedRingBuffer::open(&name)?;
@@ -95,9 +95,8 @@ mod tests {
         // wait for first frame to arrive
         {
             let mut context = rx.zero_copy_context();
-            match context.recv::<YuvFrame>() {
-                Err(e) => panic!("error receiving: {:?}", e),
-                Ok(_) => (),
+            if let Err(e) = context.recv::<YuvFrame>() {
+                panic!("error receiving: {:?}", e);
             };
         }
 
@@ -113,9 +112,8 @@ mod tests {
 
         loop {
             let mut context = rx.zero_copy_context();
-            match context.try_recv::<YuvFrame>()? {
-                Some(_) => (),
-                None => break,
+            if context.try_recv::<YuvFrame>()?.is_none() {
+                break;
             }
         }
 
@@ -123,7 +121,7 @@ mod tests {
     }
 
     #[bench]
-    fn bench_ipc_channel(b: &mut Bencher) -> Result<(), Error> {
+    fn bench_ipc_channel(b: &mut Bencher) -> Result<()> {
         let (tx, rx) = ipc::channel()?;
         let alive = Arc::new(AtomicBool::new(true));
 
@@ -158,9 +156,8 @@ mod tests {
         });
 
         // wait for first frame to arrive
-        match rx.recv() {
-            Err(e) => panic!("error receiving: {:?}", e),
-            Ok(_) => (),
+        if let Err(e) = rx.recv() {
+            panic!("error receiving: {:?}", e);
         }
 
         b.iter(|| {
@@ -176,7 +173,7 @@ mod tests {
     }
 
     #[bench]
-    fn bench_ipc_channel_bytes(b: &mut Bencher) -> Result<(), Error> {
+    fn bench_ipc_channel_bytes(b: &mut Bencher) -> Result<()> {
         let (tx, rx) = ipc::bytes_channel()?;
         let alive = Arc::new(AtomicBool::new(true));
 
@@ -215,9 +212,8 @@ mod tests {
         });
 
         // wait for first frame to arrive
-        match rx.recv() {
-            Err(e) => panic!("error receiving: {:?}", e),
-            Ok(_) => (),
+        if let Err(e) = rx.recv() {
+            panic!("error receiving: {:?}", e);
         }
 
         b.iter(|| {

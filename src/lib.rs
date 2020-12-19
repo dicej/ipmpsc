@@ -8,28 +8,38 @@
 #![deny(warnings)]
 
 use memmap::MmapMut;
-use native::Header;
+use os::{Buffer, Header, View};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::UnsafeCell,
     fs::{File, OpenOptions},
     mem,
-    sync::{
-        atomic::{AtomicU32, Ordering::SeqCst},
-        Arc,
-    },
+    sync::{atomic::Ordering::SeqCst, Arc},
     time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
 use thiserror::Error as ThisError;
+
+#[cfg(unix)]
+mod posix;
+
+#[cfg(unix)]
+use posix as os;
+
+#[cfg(windows)]
+mod bitmask;
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+use windows as os;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const GIT_COMMIT_SHA_SHORT: &str = env!("VERGEN_SHA_SHORT");
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
-
-const DECADE_SECS: u64 = 60 * 60 * 24 * 365 * 10;
 
 #[derive(ThisError, Debug)]
 pub enum Error {
@@ -48,6 +58,10 @@ pub enum Error {
     #[error("Serialized size of message is too large for ring buffer")]
     MessageTooLarge,
 
+    /// Error indicating the the maximum number of simultaneous senders has been exceeded.
+    #[error("Too many simultaneous senders")]
+    TooManySenders,
+
     /// Implementation-specific runtime failure (e.g. a libc mutex error).
     #[error("{0}")]
     Runtime(String),
@@ -63,168 +77,6 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[cfg(unix)]
-mod native {
-    use super::*;
-    use std::{mem::MaybeUninit, os::raw::c_long, time::SystemTime};
-
-    // libc::PTHREAD_PROCESS_SHARED doesn't exist for Android for some
-    // reason, so we need to declare it ourselves:
-    #[cfg(target_os = "android")]
-    const PTHREAD_PROCESS_SHARED: i32 = 1;
-
-    #[cfg(not(target_os = "android"))]
-    const PTHREAD_PROCESS_SHARED: i32 = libc::PTHREAD_PROCESS_SHARED;
-
-    macro_rules! nonzero {
-        ($x:expr) => {{
-            let x = $x;
-            if x == 0 {
-                Ok(())
-            } else {
-                Err(Error::Runtime(format!("{} failed: {}", stringify!($x), x)))
-            }
-        }};
-    }
-
-    #[repr(C)]
-    pub struct Header {
-        mutex: UnsafeCell<libc::pthread_mutex_t>,
-        condition: UnsafeCell<libc::pthread_cond_t>,
-        pub read: AtomicU32,
-        pub write: AtomicU32,
-    }
-
-    impl Header {
-        pub fn init(&self) -> Result<()> {
-            unsafe {
-                let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
-                nonzero!(libc::pthread_mutexattr_init(attr.as_mut_ptr()))?;
-                nonzero!(libc::pthread_mutexattr_setpshared(
-                    attr.as_mut_ptr(),
-                    PTHREAD_PROCESS_SHARED
-                ))?;
-                nonzero!(libc::pthread_mutex_init(self.mutex.get(), attr.as_ptr()))?;
-                nonzero!(libc::pthread_mutexattr_destroy(attr.as_mut_ptr()))?;
-
-                let mut attr = MaybeUninit::<libc::pthread_condattr_t>::uninit();
-                nonzero!(libc::pthread_condattr_init(attr.as_mut_ptr()))?;
-                nonzero!(libc::pthread_condattr_setpshared(
-                    attr.as_mut_ptr(),
-                    PTHREAD_PROCESS_SHARED
-                ))?;
-                nonzero!(libc::pthread_cond_init(self.condition.get(), attr.as_ptr()))?;
-                nonzero!(libc::pthread_condattr_destroy(attr.as_mut_ptr()))?;
-            }
-
-            self.read.store(BEGINNING, SeqCst);
-            self.write.store(BEGINNING, SeqCst);
-
-            Ok(())
-        }
-
-        pub fn lock(&self) -> Result<Lock> {
-            unsafe {
-                nonzero!(libc::pthread_mutex_lock(self.mutex.get()))?;
-            }
-            Ok(Lock(self))
-        }
-
-        pub fn notify_all(&self) -> Result<()> {
-            unsafe { nonzero!(libc::pthread_cond_broadcast(self.condition.get())) }
-        }
-    }
-
-    pub struct Lock<'a>(&'a Header);
-
-    impl<'a> Lock<'a> {
-        pub fn wait(&self) -> Result<()> {
-            unsafe {
-                nonzero!(libc::pthread_cond_wait(
-                    self.0.condition.get(),
-                    self.0.mutex.get()
-                ))
-            }
-        }
-
-        #[allow(clippy::cast_lossless)]
-        pub fn timed_wait(&self, timeout: Duration) -> Result<()> {
-            let then = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                + timeout;
-
-            let then = libc::timespec {
-                tv_sec: then.as_secs() as libc::time_t,
-                tv_nsec: then.subsec_nanos() as c_long,
-            };
-
-            let timeout_ok = |result| if result == libc::ETIMEDOUT { 0 } else { result };
-
-            unsafe {
-                nonzero!(timeout_ok(libc::pthread_cond_timedwait(
-                    self.0.condition.get(),
-                    self.0.mutex.get(),
-                    &then
-                )))
-            }
-        }
-    }
-
-    impl<'a> Drop for Lock<'a> {
-        fn drop(&mut self) {
-            unsafe {
-                libc::pthread_mutex_unlock(self.0.mutex.get());
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-mod native {
-    use super::*;
-
-    #[repr(C)]
-    pub struct Header {
-        // todo
-        pub read: AtomicU32,
-        pub write: AtomicU32,
-    }
-
-    impl Header {
-        pub fn init(&self) -> Result<()> {
-            todo!()
-        }
-
-        pub fn lock(&self) -> Result<Lock> {
-            todo!()
-        }
-
-        pub fn notify_all(&self) -> Result<()> {
-            todo!()
-        }
-    }
-
-    pub struct Lock<'a>(&'a Header);
-
-    impl<'a> Lock<'a> {
-        pub fn wait(&self) -> Result<()> {
-            todo!()
-        }
-
-        pub fn timed_wait(&self, timeout: Duration) -> Result<()> {
-            let _ = timeout;
-            todo!()
-        }
-    }
-
-    impl<'a> Drop for Lock<'a> {
-        fn drop(&mut self) {
-            todo!()
-        }
-    }
-}
-
 fn map(file: &File) -> Result<MmapMut> {
     unsafe {
         let map = MmapMut::map_mut(&file)?;
@@ -236,11 +88,6 @@ fn map(file: &File) -> Result<MmapMut> {
     }
 }
 
-struct RingBuffer {
-    map: MmapMut,
-    _file: Option<NamedTempFile>,
-}
-
 /// Represents a file-backed shared memory ring buffer, suitable for constructing a
 /// [`Receiver`](struct.Receiver.html) or [`Sender`](struct.Sender.html).
 ///
@@ -248,9 +95,7 @@ struct RingBuffer {
 /// path in a single process, but it is much more efficient to clone an exisiting instance than construct one from
 /// scratch using one of the constructors.
 #[derive(Clone)]
-pub struct SharedRingBuffer {
-    inner: Arc<UnsafeCell<RingBuffer>>,
-}
+pub struct SharedRingBuffer(View);
 
 unsafe impl Sync for SharedRingBuffer {}
 
@@ -264,7 +109,7 @@ impl SharedRingBuffer {
     /// Once this function completes successfully, the same path may be used to create one or more corresponding
     /// instances in other processes using the [`SharedRingBuffer::open`](struct.SharedRingBuffer.html#method.open)
     /// method.
-    pub fn create(path: &str, size_in_bytes: u32) -> Result<SharedRingBuffer> {
+    pub fn create(path: &str, size_in_bytes: u32) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -274,12 +119,9 @@ impl SharedRingBuffer {
 
         file.set_len(u64::from(BEGINNING + size_in_bytes))?;
 
-        Ok(SharedRingBuffer {
-            inner: Arc::new(UnsafeCell::new(RingBuffer {
-                map: map(&file)?,
-                _file: None,
-            })),
-        })
+        Ok(Self(View::try_new(Arc::new(UnsafeCell::new(
+            Buffer::try_new(path, map(&file)?, None)?,
+        )))?))
     }
 
     /// Creates a new [`SharedRingBuffer`](struct.SharedRingBuffer.html) backed by a temporary file which will be
@@ -288,23 +130,27 @@ impl SharedRingBuffer {
     /// The name of the file is returned along with the [`SharedRingBuffer`](struct.SharedRingBuffer.html) and may
     /// be used to create one or more corresponding instances in other processes using the
     /// [`SharedRingBuffer::open`](struct.SharedRingBuffer.html#method.open) method.
-    pub fn create_temp(size_in_bytes: u32) -> Result<(String, SharedRingBuffer)> {
+    pub fn create_temp(size_in_bytes: u32) -> Result<(String, Self)> {
         let file = NamedTempFile::new()?;
 
         file.as_file()
             .set_len(u64::from(BEGINNING + size_in_bytes))?;
 
+        let path = file
+            .path()
+            .to_str()
+            .ok_or_else(|| Error::Runtime("unable to represent path as string".into()))?
+            .to_owned();
+
+        let map = map(file.as_file())?;
+
         Ok((
-            file.path()
-                .to_str()
-                .ok_or_else(|| Error::Runtime("unable to represent path as string".into()))?
-                .to_owned(),
-            SharedRingBuffer {
-                inner: Arc::new(UnsafeCell::new(RingBuffer {
-                    map: map(file.as_file())?,
-                    _file: Some(file),
-                })),
-            },
+            path.to_owned(),
+            Self(View::try_new(Arc::new(UnsafeCell::new(Buffer::try_new(
+                &path,
+                map,
+                Some(file),
+            )?)))?),
         ))
     }
 
@@ -313,41 +159,32 @@ impl SharedRingBuffer {
     /// The file must already exist and have been initialized by a call to
     /// [`SharedRingBuffer::create`](struct.SharedRingBuffer.html#method.create) or
     /// [`SharedRingBuffer::create_temp`](struct.SharedRingBuffer.html#method.create_temp).
-    pub fn open(path: &str) -> Result<SharedRingBuffer> {
+    pub fn open(path: &str) -> Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let map = unsafe { MmapMut::map_mut(&file)? };
 
-        Ok(SharedRingBuffer {
-            inner: Arc::new(UnsafeCell::new(RingBuffer { map, _file: None })),
-        })
-    }
-
-    fn header(&self) -> &Header {
-        #[allow(clippy::cast_ptr_alignment)]
-        unsafe {
-            &*((*self.inner.get()).map.as_ptr() as *const Header)
-        }
+        Ok(Self(View::try_new(Arc::new(UnsafeCell::new(
+            Buffer::try_new(path, map, None)?,
+        )))?))
     }
 }
 
 /// Represents the receiving end of an inter-process channel, capable of receiving any message type implementing
 /// [`serde::Deserialize`](https://docs.serde.rs/serde/trait.Deserialize.html).
-pub struct Receiver {
-    buffer: SharedRingBuffer,
-}
+pub struct Receiver(SharedRingBuffer);
 
 impl Receiver {
     /// Constructs a [`Receiver`](struct.Receiver.html) from the specified
     /// [`SharedRingBuffer`](struct.SharedRingBuffer.html)
     pub fn new(buffer: SharedRingBuffer) -> Self {
-        Self { buffer }
+        Self(buffer)
     }
 
     fn seek(&self, position: u32) -> Result<()> {
-        let header = self.buffer.header();
-        let _lock = header.lock()?;
-        header.read.store(position, SeqCst);
-        header.notify_all()
+        let buffer = self.0 .0.buffer();
+        let mut lock = buffer.lock()?;
+        buffer.header().read.store(position, SeqCst);
+        lock.notify_all()
     }
 
     /// Attempt to read a message without blocking.
@@ -367,28 +204,28 @@ impl Receiver {
     }
 
     fn try_recv_0<'a, T: Deserialize<'a>>(&'a self) -> Result<Option<(T, u32)>> {
-        let header = self.buffer.header();
-        let map = unsafe { &(*self.buffer.inner.get()).map };
+        let buffer = self.0 .0.buffer();
+        let map = buffer.map();
 
-        let mut read = header.read.load(SeqCst);
-        let write = header.write.load(SeqCst);
+        let mut read = buffer.header().read.load(SeqCst);
+        let write = buffer.header().write.load(SeqCst);
 
         Ok(loop {
             if write != read {
-                let buffer = map.as_ref();
+                let slice = map.as_ref();
                 let start = read + 4;
-                let size = bincode::deserialize::<u32>(&buffer[read as usize..start as usize])?;
+                let size = bincode::deserialize::<u32>(&slice[read as usize..start as usize])?;
                 if size > 0 {
                     let end = start + size;
                     break Some((
-                        bincode::deserialize(&buffer[start as usize..end as usize])?,
+                        bincode::deserialize(&slice[start as usize..end as usize])?,
                         end,
                     ));
                 } else if write < read {
                     read = BEGINNING;
-                    let _lock = header.lock()?;
-                    header.read.store(read, SeqCst);
-                    header.notify_all()?;
+                    let mut lock = buffer.lock()?;
+                    buffer.header().read.store(read, SeqCst);
+                    lock.notify_all()?;
                 } else {
                     return Err(Error::Runtime("corrupt ring buffer".into()));
                 }
@@ -403,8 +240,11 @@ impl Receiver {
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.recv_timeout(Duration::from_secs(DECADE_SECS))
-            .map(Option::unwrap)
+        let (value, position) = self.recv_timeout_0(None)?.unwrap();
+
+        self.seek(position)?;
+
+        Ok(value)
     }
 
     /// Attempt to read a message, blocking for up to the specified duration if necessary until one becomes
@@ -414,7 +254,7 @@ impl Receiver {
         T: for<'de> Deserialize<'de>,
     {
         Ok(
-            if let Some((value, position)) = self.recv_timeout_0(timeout)? {
+            if let Some((value, position)) = self.recv_timeout_0(Some(timeout))? {
                 self.seek(position)?;
 
                 Some(value)
@@ -450,7 +290,7 @@ impl Receiver {
 
     fn recv_timeout_0<'a, T: Deserialize<'a>>(
         &'a self,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<Option<(T, u32)>> {
         let mut deadline = None;
         loop {
@@ -458,18 +298,18 @@ impl Receiver {
                 return Ok(Some(value_and_position));
             }
 
-            let header = self.buffer.header();
+            let buffer = self.0 .0.buffer();
 
             let mut now = Instant::now();
-            deadline = deadline.or_else(|| Some(now + timeout));
+            deadline = deadline.or_else(|| timeout.map(|timeout| now + timeout));
 
-            let read = header.read.load(SeqCst);
+            let read = buffer.header().read.load(SeqCst);
 
-            let lock = header.lock()?;
-            while read == header.write.load(SeqCst) {
-                let deadline = deadline.unwrap();
-                if deadline > now {
-                    lock.timed_wait(deadline - now)?;
+            let mut lock = buffer.lock()?;
+            while read == buffer.header().write.load(SeqCst) {
+                if deadline.map(|deadline| deadline > now).unwrap_or(true) {
+                    lock.timed_wait(&self.0 .0, deadline.map(|deadline| deadline - now))?;
+
                     now = Instant::now();
                 } else {
                     return Ok(None);
@@ -519,8 +359,11 @@ impl<'a> ZeroCopyContext<'a> {
     /// This will return `Err(`[`Error::AlreadyReceived`](enum.Error.html#variant.AlreadyReceived)`))` if this
     /// instance has already been used to read a message.
     pub fn recv<'b, T: Deserialize<'b>>(&'b mut self) -> Result<T> {
-        self.recv_timeout(Duration::from_secs(DECADE_SECS))
-            .map(Option::unwrap)
+        let (value, position) = self.receiver.recv_timeout_0(None)?.unwrap();
+
+        self.position = Some(position);
+
+        Ok(value)
     }
 
     /// Attempt to read a message, blocking for up to the specified duration if necessary until one becomes
@@ -536,7 +379,7 @@ impl<'a> ZeroCopyContext<'a> {
             Err(Error::AlreadyReceived)
         } else {
             Ok(
-                if let Some((value, position)) = self.receiver.recv_timeout_0(timeout)? {
+                if let Some((value, position)) = self.receiver.recv_timeout_0(Some(timeout))? {
                     self.position = Some(position);
                     Some(value)
                 } else {
@@ -557,15 +400,13 @@ impl<'a> Drop for ZeroCopyContext<'a> {
 
 /// Represents the sending end of an inter-process channel.
 #[derive(Clone)]
-pub struct Sender {
-    buffer: SharedRingBuffer,
-}
+pub struct Sender(SharedRingBuffer);
 
 impl Sender {
     /// Constructs a [`Sender`](struct.Sender.html) from the specified
     /// [`SharedRingBuffer`](struct.SharedRingBuffer.html)
     pub fn new(buffer: SharedRingBuffer) -> Self {
-        Self { buffer }
+        Self(buffer)
     }
 
     /// Send the specified message, waiting for sufficient contiguous space to become available in the ring buffer
@@ -593,8 +434,8 @@ impl Sender {
     }
 
     fn send_0(&self, value: &impl Serialize, wait_until_empty: bool) -> Result<()> {
-        let header = self.buffer.header();
-        let map = unsafe { &mut (*self.buffer.inner.get()).map };
+        let buffer = self.0 .0.buffer();
+        let map = self.0 .0.map_mut();
 
         let size = bincode::serialized_size(value)? as u32;
 
@@ -608,11 +449,11 @@ impl Sender {
             return Err(Error::MessageTooLarge);
         }
 
-        let lock = header.lock()?;
+        let mut lock = buffer.lock()?;
         let mut write;
         loop {
-            write = header.write.load(SeqCst);
-            let read = header.read.load(SeqCst);
+            write = buffer.header().write.load(SeqCst);
+            let read = buffer.header().read.load(SeqCst);
 
             if write == read || (write > read && !wait_until_empty) {
                 if (write + size + 8) as usize <= map_len {
@@ -625,15 +466,15 @@ impl Sender {
                         &0_u32,
                     )?;
                     write = BEGINNING;
-                    header.write.store(write, SeqCst);
-                    header.notify_all()?;
+                    buffer.header().write.store(write, SeqCst);
+                    lock.notify_all()?;
                     continue;
                 }
             } else if write + size + 8 <= read && !wait_until_empty {
                 break;
             }
 
-            lock.wait()?;
+            lock.wait(&self.0 .0)?;
         }
 
         let start = write + 4;
@@ -642,8 +483,8 @@ impl Sender {
         let end = start + size;
         bincode::serialize_into(&mut map[start as usize..end as usize], value)?;
 
-        header.write.store(end, SeqCst);
-        header.notify_all()?;
+        buffer.header().write.store(end, SeqCst);
+        lock.notify_all()?;
 
         Ok(())
     }
@@ -671,33 +512,36 @@ mod tests {
             let receiver_thread = if self.sender_count == 1 {
                 // Only one sender means we can expect to receive in a predictable order:
                 let expected = self.data.clone();
-                thread::spawn(move || -> Result<()> {
-                    for item in &expected {
-                        let received = rx.recv::<Vec<u8>>()?;
-                        assert_eq!(item, &received);
-                    }
+                thread::Builder::new()
+                    .name("receiver".into())
+                    .spawn(move || -> Result<()> {
+                        for item in &expected {
+                            let received = rx.recv::<Vec<u8>>()?;
+                            assert_eq!(item, &received);
+                        }
 
-                    Ok(())
-                })
+                        Ok(())
+                    })?
             } else {
                 // Multiple senders mean we'll receive in an unpredictable order, so just verify we receive the
                 // expected number of messages:
                 let expected = self.data.len() * self.sender_count as usize;
-                thread::spawn(move || -> Result<()> {
-                    for _ in 0..expected {
-                        rx.recv::<Vec<u8>>()?;
-                    }
-
-                    Ok(())
-                })
+                thread::Builder::new()
+                    .name("receiver".into())
+                    .spawn(move || -> Result<()> {
+                        for _ in 0..expected {
+                            rx.recv::<Vec<u8>>()?;
+                        }
+                        Ok(())
+                    })?
             };
 
             let tx = Sender::new(SharedRingBuffer::open(&name)?);
 
             let data = Arc::new(self.data.clone());
             let sender_threads = (0..self.sender_count)
-                .map(move |_| {
-                    thread::spawn({
+                .map(move |i| {
+                    thread::Builder::new().name(format!("sender-{}", i)).spawn({
                         let tx = tx.clone();
                         let data = data.clone();
                         move || -> Result<()> {
@@ -709,7 +553,7 @@ mod tests {
                         }
                     })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
 
             for thread in sender_threads {
                 thread.join().map_err(|e| anyhow!("{:?}", e))??;
@@ -778,10 +622,43 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn slow_sender_with_recv_timeout() -> Result<()> {
+        let (name, buffer) = SharedRingBuffer::create_temp(256)?;
+        let rx = Receiver::new(buffer);
+        let tx = Sender::new(SharedRingBuffer::open(&name)?);
+
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_secs(1));
+            tx.send(&42_u32)
+        });
+
+        loop {
+            if let Some(value) = rx.recv_timeout(Duration::from_millis(1))? {
+                assert_eq!(42_u32, value);
+                break;
+            }
+        }
+
+        sender.join().map_err(|e| anyhow!("{:?}", e))??;
+
+        Ok(())
+    }
+
     proptest! {
         #[test]
         fn arbitrary_case(case in arb_case()) {
-            let result = case.run();
+            let result = thread::spawn(move || {
+                let result = case.run();
+                if let Err(e) = &result {
+                    println!("\ntrouble: {:?}", e);
+                } else if false {
+                    print!(".");
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                }
+                result
+            }).join().unwrap();
+
             prop_assume!(result.is_ok(), "error: {:?}", result.unwrap_err());
         }
     }
