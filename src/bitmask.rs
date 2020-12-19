@@ -41,15 +41,15 @@ impl BitMask {
     }
 
     pub fn get(self, index: u8) -> bool {
-        (self.0 & 1u128.checked_shl(index.into()).unwrap()) != 0
+        (self.0 & 1_u128.checked_shl(index.into()).unwrap()) != 0
     }
 
     pub fn set(self, index: u8) -> Self {
-        Self(self.0 | 1u128.checked_shl(index.into()).unwrap())
+        Self(self.0 | 1_u128.checked_shl(index.into()).unwrap())
     }
 
     pub fn clear(&self, index: u8) -> Self {
-        Self(self.0 & !(1u128.checked_shl(index.into()).unwrap()))
+        Self(self.0 & !(1_u128.checked_shl(index.into()).unwrap()))
     }
 }
 

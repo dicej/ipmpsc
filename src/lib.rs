@@ -629,6 +629,29 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn slow_sender_with_recv_timeout() -> Result<()> {
+        let (name, buffer) = SharedRingBuffer::create_temp(256)?;
+        let rx = Receiver::new(buffer);
+        let tx = Sender::new(SharedRingBuffer::open(&name)?);
+
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_secs(1));
+            tx.send(&42_u32)
+        });
+
+        loop {
+            if let Some(value) = rx.recv_timeout(Duration::from_millis(1))? {
+                assert_eq!(42_u32, value);
+                break;
+            }
+        }
+
+        sender.join().map_err(|e| anyhow!("{:?}", e))??;
+
+        Ok(())
+    }
+
     proptest! {
         #[test]
         fn arbitrary_case(case in arb_case()) {

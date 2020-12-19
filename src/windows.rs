@@ -76,7 +76,7 @@ fn get_last_error() -> String {
     .unwrap_or_else(|| "unknown error".to_owned())
 }
 
-macro_rules! success {
+macro_rules! expect {
     ($x:expr) => {{
         let x = $x;
         if x {
@@ -258,7 +258,7 @@ pub struct Lock<'a> {
 
 impl<'a> Lock<'a> {
     pub fn try_new(buffer: &Buffer) -> Result<Lock> {
-        success!(
+        expect!(
             winbase::WAIT_OBJECT_0
                 == unsafe { synchapi::WaitForSingleObject(buffer.mutex, winbase::INFINITE) }
         )?;
@@ -274,18 +274,18 @@ impl<'a> Lock<'a> {
 
         *self.waiters() = self.waiters().set(index);
 
-        success!(minwindef::TRUE == unsafe { synchapi::ReleaseMutex(self.buffer.mutex) })?;
+        expect!(minwindef::TRUE == unsafe { synchapi::ReleaseMutex(self.buffer.mutex) })?;
 
         self.locked = false;
 
         let _ = milliseconds;
 
-        success!(matches!(
+        expect!(matches!(
             unsafe { synchapi::WaitForSingleObject(self.buffer.semaphore(index)?, 10000) },
             winbase::WAIT_OBJECT_0 | winerror::WAIT_TIMEOUT
         ))?;
 
-        success!(
+        expect!(
             winbase::WAIT_OBJECT_0
                 == unsafe { synchapi::WaitForSingleObject(self.buffer.mutex, winbase::INFINITE) }
         )?;
@@ -318,16 +318,15 @@ impl<'a> Lock<'a> {
         let waiters = *self.waiters();
 
         for index in waiters.ones() {
-            if minwindef::FALSE
-                == unsafe {
-                    synchapi::ReleaseSemaphore(self.buffer.semaphore(index)?, 1, ptr::null_mut())
-                }
-            {
-                return Err(Error::Runtime(format!(
-                    "ReleaseSemaphore failed: {}",
-                    get_last_error()
-                )));
-            }
+            // We're ignoring the return value below because TRUE means the sempahore was successfully incremented
+            // and FALSE (presumably) means it had already been incremented to its maximum, which is also fine.
+            //
+            // Unfortunately, there's no reliable way to distinguish between different error conditions
+            // programatically since the exact code returned by GetLastError is not considered part of the
+            // supported Windows API by Microsoft.
+            unsafe {
+                synchapi::ReleaseSemaphore(self.buffer.semaphore(index)?, 1, ptr::null_mut())
+            };
         }
 
         *self.waiters() = BitMask::default();
