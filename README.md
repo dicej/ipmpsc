@@ -50,9 +50,8 @@ environment in which it runs.
 
 ## Platform Support
 
-The current implementation should work on any POSIX-compatible OS.
-It's been tested on Linux and Android.  Windows support is planned but
-has not been started yet.
+The current implementation should work on Windows and any POSIX-compatible OS.
+It's been tested on Linux, Windows and Android.
 
 ## Similar Projects
 
