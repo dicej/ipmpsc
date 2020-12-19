@@ -1,4 +1,5 @@
 /target
+ipc-benchmarks/target
 **/*.rs.bk
 Cargo.lock
 .gdb_history

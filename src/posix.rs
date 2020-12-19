@@ -1,4 +1,16 @@
-use std::{mem::MaybeUninit, os::raw::c_long, time::SystemTime};
+use crate::{Error, Result};
+use memmap::MmapMut;
+use std::{
+    cell::UnsafeCell,
+    mem::MaybeUninit,
+    os::raw::c_long,
+    sync::{
+        atomic::{AtomicU32, Ordering::SeqCst},
+        Arc,
+    },
+    time::{Duration, SystemTime},
+};
+use tempfile::NamedTempFile;
 
 // libc::PTHREAD_PROCESS_SHARED doesn't exist for Android for some
 // reason, so we need to declare it ourselves:
@@ -49,48 +61,92 @@ impl Header {
             nonzero!(libc::pthread_condattr_destroy(attr.as_mut_ptr()))?;
         }
 
-        self.read.store(BEGINNING, SeqCst);
-        self.write.store(BEGINNING, SeqCst);
+        self.read.store(crate::BEGINNING, SeqCst);
+        self.write.store(crate::BEGINNING, SeqCst);
 
         Ok(())
     }
 }
 
-pub struct Monitor;
+#[derive(Clone)]
+pub struct View(Arc<UnsafeCell<Buffer>>);
 
-impl Monitor {
-    pub fn try_new(_path: &str) -> Result<Monitor> {
-        Ok(Monitor)
+impl View {
+    pub fn try_new(buffer: Arc<UnsafeCell<Buffer>>) -> Result<Self> {
+        Ok(View(buffer))
+    }
+
+    pub fn buffer(&self) -> &Buffer {
+        unsafe { &*self.0.get() }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    pub fn map_mut(&self) -> &mut MmapMut {
+        unsafe { (*self.0.get()).map_mut() }
     }
 }
 
-pub struct Lock<'a>(&'a Header);
+pub struct Buffer {
+    map: MmapMut,
+    _file: Option<NamedTempFile>,
+}
+
+impl Buffer {
+    pub fn try_new(_path: &str, map: MmapMut, file: Option<NamedTempFile>) -> Result<Self> {
+        Ok(Buffer { map, _file: file })
+    }
+
+    pub fn header(&self) -> &Header {
+        #[allow(clippy::cast_ptr_alignment)]
+        unsafe {
+            &*(self.map.as_ptr() as *const Header)
+        }
+    }
+
+    pub fn lock(&self) -> Result<Lock> {
+        Lock::try_new(self)
+    }
+
+    pub fn map(&self) -> &MmapMut {
+        &self.map
+    }
+
+    pub fn map_mut(&mut self) -> &mut MmapMut {
+        &mut self.map
+    }
+}
+
+pub struct Lock<'a>(&'a Buffer);
 
 impl<'a> Lock<'a> {
-    pub fn try_new(header: &Header, _monitor: &Monitor) -> Result<Lock> {
+    pub fn try_new(buffer: &Buffer) -> Result<Lock> {
         unsafe {
-            nonzero!(libc::pthread_mutex_lock(header.mutex.get()))?;
+            nonzero!(libc::pthread_mutex_lock(buffer.header().mutex.get()))?;
         }
-        Ok(Lock(header))
+        Ok(Lock(buffer))
     }
 
-    pub fn notify_all(&self) -> Result<()> {
-        unsafe { nonzero!(libc::pthread_cond_broadcast(self.0.condition.get())) }
+    pub fn notify_all(&mut self) -> Result<()> {
+        unsafe {
+            nonzero!(libc::pthread_cond_broadcast(
+                self.0.header().condition.get()
+            ))
+        }
     }
 
-    pub fn wait(&self) -> Result<()> {
+    pub fn wait(&mut self, _view: &View) -> Result<()> {
         unsafe {
             nonzero!(libc::pthread_cond_wait(
-                self.0.condition.get(),
-                self.0.mutex.get()
+                self.0.header().condition.get(),
+                self.0.header().mutex.get()
             ))
         }
     }
 
     #[allow(clippy::cast_lossless)]
-    pub fn timed_wait(&self, timeout: Duration) -> Result<()> {
-        if timeout == forever() {
-            self.wait()
+    pub fn timed_wait(&mut self, view: &View, timeout: Duration) -> Result<()> {
+        if timeout == crate::forever() {
+            self.wait(view)
         } else {
             let then = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -106,8 +162,8 @@ impl<'a> Lock<'a> {
 
             unsafe {
                 nonzero!(timeout_ok(libc::pthread_cond_timedwait(
-                    self.0.condition.get(),
-                    self.0.mutex.get(),
+                    self.0.header().condition.get(),
+                    self.0.header().mutex.get(),
                     &then
                 )))
             }
@@ -118,7 +174,7 @@ impl<'a> Lock<'a> {
 impl<'a> Drop for Lock<'a> {
     fn drop(&mut self) {
         unsafe {
-            libc::pthread_mutex_unlock(self.0.mutex.get());
+            libc::pthread_mutex_unlock(self.0.header().mutex.get());
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::{bitmask::BitMask, Error, Result, BEGINNING};
+use crate::{bitmask::BitMask, Error, Result};
 use memmap::MmapMut;
 use std::{
     cell::UnsafeCell,
@@ -105,8 +105,8 @@ impl Header {
             ptr::write(self.threads.get(), BitMask::default());
             ptr::write(self.waiters.get(), BitMask::default());
         }
-        self.read.store(BEGINNING, SeqCst);
-        self.write.store(BEGINNING, SeqCst);
+        self.read.store(crate::BEGINNING, SeqCst);
+        self.write.store(crate::BEGINNING, SeqCst);
 
         Ok(())
     }
@@ -132,6 +132,7 @@ impl View {
         unsafe { &*self.buffer.get() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn map_mut(&self) -> &mut MmapMut {
         unsafe { (*self.buffer.get()).map_mut() }
     }

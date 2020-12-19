@@ -26,6 +26,7 @@ mod posix;
 #[cfg(unix)]
 use posix as native;
 
+#[cfg(windows)]
 mod bitmask;
 
 #[cfg(windows)]
@@ -325,7 +326,9 @@ impl Receiver {
                 if deadline.map(|deadline| deadline > now).unwrap_or(true) {
                     lock.timed_wait(
                         &self.0 .0,
-                        deadline.map(|deadline| deadline - now).unwrap_or(forever()),
+                        deadline
+                            .map(|deadline| deadline - now)
+                            .unwrap_or_else(forever),
                     )?;
 
                     now = Instant::now();
