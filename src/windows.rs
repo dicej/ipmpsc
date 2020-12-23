@@ -350,3 +350,15 @@ impl<'a> Drop for Lock<'a> {
         }
     }
 }
+
+#[cfg(any(test, feature = "fork"))]
+pub mod test {
+    use anyhow::Result;
+    use std::thread::{self, JoinHandle};
+
+    pub fn fork<F: Send + 'static + FnOnce() -> Result<()>>(
+        fun: F,
+    ) -> Result<JoinHandle<Result<()>>> {
+        Ok(thread::spawn(fun))
+    }
+}

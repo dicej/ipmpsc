@@ -178,3 +178,136 @@ impl<'a> Drop for Lock<'a> {
         }
     }
 }
+
+#[cfg(any(test, feature = "fork"))]
+pub mod test {
+    use anyhow::{anyhow, Result};
+    use errno::errno;
+    use std::{
+        ffi::c_void,
+        io::Write,
+        os::raw::c_int,
+        process,
+        thread::{self, JoinHandle},
+    };
+
+    struct Descriptor(c_int);
+
+    impl Descriptor {
+        fn forward(&self, dst: &mut dyn Write) -> Result<()> {
+            loop {
+                let mut buffer = [0u8; 1024];
+
+                let count =
+                    unsafe { libc::read(self.0, buffer.as_mut_ptr() as *mut c_void, buffer.len()) };
+
+                match count {
+                    -1 => {
+                        break Err(anyhow!("unable to read; errno: {}", errno()));
+                    }
+                    0 => {
+                        break Ok(());
+                    }
+                    _ => {
+                        dst.write_all(&buffer[..count as usize])?;
+                    }
+                }
+            }
+        }
+    }
+
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.0) };
+        }
+    }
+
+    fn pipe() -> Result<(Descriptor, Descriptor)> {
+        let mut fds = [0; 2];
+        if -1 == unsafe { libc::pipe(fds.as_mut_ptr()) } {
+            return Err(anyhow!("pipe failed; errno: {}", errno()));
+        }
+
+        Ok((Descriptor(fds[0]), Descriptor(fds[1])))
+    }
+
+    pub fn fork<F: Send + 'static + FnOnce() -> Result<()>>(
+        fun: F,
+    ) -> Result<JoinHandle<Result<()>>> {
+        let (_, out_tx) = pipe()?;
+        let (err_rx, err_tx) = pipe()?;
+        let (alive_rx, alive_tx) = pipe()?;
+
+        match unsafe { libc::fork() } {
+            -1 => Err(anyhow!("fork failed; errno: {}", errno())),
+            0 => {
+                // I'm the child process -- forward stdout and stderr to parent, call function, and exit, but exit
+                // early if parent dies
+
+                drop(alive_tx);
+
+                thread::spawn(move || {
+                    let mut buffer = [0u8; 1];
+
+                    unsafe {
+                        libc::read(alive_rx.0, buffer.as_mut_ptr() as *mut c_void, buffer.len())
+                    };
+
+                    // if the above read returns, we assume the parent is dead, so time to exit
+                    process::exit(1);
+                });
+
+                // stdout (FD 1)
+                if -1 == unsafe { libc::dup2(out_tx.0, 1) } {
+                    return Err(anyhow!("dup2 failed; errno: {}", errno()));
+                }
+
+                // stderr (FD 2)
+                if -1 == unsafe { libc::dup2(err_tx.0, 2) } {
+                    return Err(anyhow!("dup2 failed; errno: {}", errno()));
+                }
+
+                if let Err(e) = fun() {
+                    eprintln!("{:?}", e);
+                    process::exit(1);
+                } else {
+                    process::exit(0);
+                }
+            }
+            pid => {
+                // I'm the parent process -- spawn a thread to monitor the child
+
+                Ok(thread::spawn(move || {
+                    let _alive_tx = alive_tx;
+                    let mut stderr = Vec::<u8>::new();
+                    err_rx.forward(&mut stderr)?;
+
+                    let mut status = 0;
+                    if -1 == unsafe { libc::waitpid(pid, &mut status, 0) } {
+                        return Err(anyhow!("waitpid failed; errno: {}", errno()));
+                    }
+
+                    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+                        Ok(())
+                    } else {
+                        Err(anyhow!(
+                            "child exited{}{}",
+                            if libc::WIFEXITED(status) {
+                                format!(" (exit status {})", libc::WEXITSTATUS(status))
+                            } else if libc::WIFSIGNALED(status) {
+                                format!(" (killed by signal {})", libc::WTERMSIG(status))
+                            } else {
+                                String::new()
+                            },
+                            if stderr.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; stderr:\n{}", String::from_utf8_lossy(&stderr))
+                            }
+                        ))
+                    }
+                }))
+            }
+        }
+    }
+}

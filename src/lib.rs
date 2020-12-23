@@ -35,6 +35,9 @@ mod windows;
 #[cfg(windows)]
 use windows as os;
 
+#[cfg(feature = "fork")]
+pub use os::test::fork;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const GIT_COMMIT_SHA_SHORT: &str = env!("VERGEN_SHA_SHORT");
@@ -117,7 +120,7 @@ impl SharedRingBuffer {
             .truncate(true)
             .open(path)?;
 
-        file.set_len(u64::from(BEGINNING + size_in_bytes))?;
+        file.set_len(u64::from(BEGINNING + size_in_bytes + 8))?;
 
         Ok(Self(View::try_new(Arc::new(UnsafeCell::new(
             Buffer::try_new(path, map(&file)?, None)?,
@@ -134,7 +137,7 @@ impl SharedRingBuffer {
         let file = NamedTempFile::new()?;
 
         file.as_file()
-            .set_len(u64::from(BEGINNING + size_in_bytes))?;
+            .set_len(u64::from(BEGINNING + size_in_bytes + 8))?;
 
         let path = file
             .path()
@@ -512,39 +515,35 @@ mod tests {
             let receiver_thread = if self.sender_count == 1 {
                 // Only one sender means we can expect to receive in a predictable order:
                 let expected = self.data.clone();
-                thread::Builder::new()
-                    .name("receiver".into())
-                    .spawn(move || -> Result<()> {
-                        for item in &expected {
-                            let received = rx.recv::<Vec<u8>>()?;
-                            assert_eq!(item, &received);
-                        }
+                thread::spawn(move || -> Result<()> {
+                    for item in &expected {
+                        let received = rx.recv::<Vec<u8>>()?;
+                        assert_eq!(item, &received);
+                    }
 
-                        Ok(())
-                    })?
+                    Ok(())
+                })
             } else {
                 // Multiple senders mean we'll receive in an unpredictable order, so just verify we receive the
                 // expected number of messages:
                 let expected = self.data.len() * self.sender_count as usize;
-                thread::Builder::new()
-                    .name("receiver".into())
-                    .spawn(move || -> Result<()> {
-                        for _ in 0..expected {
-                            rx.recv::<Vec<u8>>()?;
-                        }
-                        Ok(())
-                    })?
+                thread::spawn(move || -> Result<()> {
+                    for _ in 0..expected {
+                        rx.recv::<Vec<u8>>()?;
+                    }
+                    Ok(())
+                })
             };
-
-            let tx = Sender::new(SharedRingBuffer::open(&name)?);
 
             let data = Arc::new(self.data.clone());
             let sender_threads = (0..self.sender_count)
-                .map(move |i| {
-                    thread::Builder::new().name(format!("sender-{}", i)).spawn({
-                        let tx = tx.clone();
+                .map(move |_| {
+                    os::test::fork({
+                        let name = name.clone();
                         let data = data.clone();
                         move || -> Result<()> {
+                            let tx = Sender::new(SharedRingBuffer::open(&name)?);
+
                             for item in data.as_ref() {
                                 tx.send(item)?;
                             }
@@ -553,7 +552,7 @@ mod tests {
                         }
                     })
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>>>()?;
 
             for thread in sender_threads {
                 thread.join().map_err(|e| anyhow!("{:?}", e))??;
@@ -628,10 +627,10 @@ mod tests {
         let rx = Receiver::new(buffer);
         let tx = Sender::new(SharedRingBuffer::open(&name)?);
 
-        let sender = thread::spawn(move || {
+        let sender = os::test::fork(move || {
             thread::sleep(Duration::from_secs(1));
-            tx.send(&42_u32)
-        });
+            tx.send(&42_u32).map_err(anyhow::Error::from)
+        })?;
 
         loop {
             if let Some(value) = rx.recv_timeout(Duration::from_millis(1))? {
