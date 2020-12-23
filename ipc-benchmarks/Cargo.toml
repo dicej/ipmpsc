@@ -5,7 +5,7 @@ authors = ["Joel Dice <joel.dice@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-ipmpsc = { path = ".." }
+ipmpsc = { path = "..", features = ["fork"] }
 ipc-channel = "0.14"
 bincode = "1"
 serde = "1"

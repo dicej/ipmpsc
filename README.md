@@ -47,23 +47,32 @@ test tests::bench_ipc_channel_bytes ... bench:   4,777,240 ns/iter (+/- 242,369)
 test tests::bench_ipmpsc            ... bench:   1,380,406 ns/iter (+/- 62,038)
 ```
 
-## Security
+## Security and Safety
 
 The ring buffer is backed by a shared memory-mapped file, which means any
 process with access to that file can read from or write to it depending on its
 privileges.  This may or may not be acceptable depending on the security needs
 of your application and the environment in which it runs.
 
+Note that zero-copy deserialization can provide shared references to the mapped
+file, and internally ipmpsc uses both shared and unique references to segments
+of the file while reading from and writing to the ring buffer.  These references
+are only safe if all processes which access the file obey Rust's memory safety
+rules (which normally only have meaning within a single process).  ipmpsc itself
+should follow the rules (please report a bug if not), but safety cannot be
+guaranteed if any process fails to do so.
+
 ## Platform Support
 
-The current implementation should work on Windows and any POSIX-compatible OS.
-It's been tested on Linux, Windows and Android.
+This library currently works on Linux, Android, and Windows.  It does
+not work reliably on MacOS, unfortunately.  See
+https://github.com/dicej/ipmpsc/issues/4 for details.  PRs to fix that are welcome!
 
 ## Similar Projects
 
 [ipc-channel](https://github.com/servo/ipc-channel) - mature and robust IPC
-channels.  Does not yet support Android, multiple simultaneous senders, or
-zero-copy deserialization.
+channels.  Does not yet support Android, Windows, multiple simultaneous
+senders, or zero-copy deserialization.
 
 [shared_memory](https://github.com/elast0ny/shared_memory-rs) - low-level,
 cross-platform shared memory support.  May be used as the basis for a
