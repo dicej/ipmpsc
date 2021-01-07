@@ -1,5 +1,6 @@
 use crate::{bitmask::BitMask, Error, Result};
 use memmap::MmapMut;
+use sha2::{Digest, Sha256};
 use std::{
     cell::UnsafeCell,
     convert::TryInto,
@@ -35,6 +36,14 @@ macro_rules! defer {
     ($e:expr) => {
         let _defer = Defer($e);
     };
+}
+
+fn sha256(string: &str) -> String {
+    let mut hasher = Sha256::default();
+
+    hasher.update(string.as_bytes());
+
+    hex::encode(&hasher.finalize() as &[u8])
 }
 
 fn get_last_error() -> String {
@@ -154,7 +163,7 @@ impl Drop for View {
 
 pub struct Buffer {
     map: MmapMut,
-    path: String,
+    unique_id: String,
     _file: Option<NamedTempFile>,
     mutex: HANDLE,
     semaphores: Mutex<[HANDLE; BitMask::capacity() as usize]>,
@@ -164,18 +173,17 @@ impl Buffer {
     pub fn try_new(path: &str, map: MmapMut, file: Option<NamedTempFile>) -> Result<Self> {
         let mut buffer = Self {
             map,
-            path: path
-                .chars()
-                .map(|c| if c.is_alphanumeric() { c } else { '-' })
-                .collect(),
+            // We derive the mutex and semaphore names from a hex-encoded hash of the path to ensure they're
+            // unique, predictable, and contain no disallowed characters
+            unique_id: sha256(path),
             _file: file,
             mutex: ptr::null_mut(),
             semaphores: Mutex::new([ptr::null_mut(); BitMask::capacity() as usize]),
         };
 
-        let mutex_string = format!("{}-mutex", buffer.path);
+        let mutex_string = format!("ipmpsc-mutex-{}", buffer.unique_id);
         let mutex_name = CString::new(mutex_string.clone())
-            .expect("should not fail -- null characters were replaced earlier");
+            .expect("should not fail -- unique_id should have no null characters");
 
         buffer.mutex = unsafe {
             synchapi::CreateMutexA(ptr::null_mut(), minwindef::FALSE, mutex_name.as_ptr())
@@ -197,9 +205,9 @@ impl Buffer {
         let mut semaphores = self.semaphores.lock().unwrap();
 
         if semaphores[index].is_null() {
-            let semaphore_string = format!("{}-semaphore-{}", self.path, index);
+            let semaphore_string = format!("ipmpsc-semaphore-{}-{}", self.unique_id, index);
             let semaphore_name = CString::new(semaphore_string.clone())
-                .expect("should not fail -- null characters were replaced earlier");
+                .expect("should not fail -- unique_id should have no null characters");
 
             semaphores[index] = unsafe {
                 winbase::CreateSemaphoreA(ptr::null_mut(), 0, 1, semaphore_name.as_ptr())
