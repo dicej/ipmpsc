@@ -41,8 +41,8 @@ pub use os::test::fork;
 /// Crate version (e.g. for logging at runtime)
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Short commit hash of code from which this crate was built (e.g. for logging at runtime)
-pub const GIT_COMMIT_SHA_SHORT: &str = env!("VERGEN_SHA_SHORT");
+/// Commit hash of code from which this crate was built, if available (e.g. for logging at runtime)
+pub const GIT_COMMIT_SHA_SHORT: Option<&str> = option_env!("VERGEN_SHA_SHORT");
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
