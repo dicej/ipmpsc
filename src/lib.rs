@@ -38,12 +38,15 @@ use windows as os;
 #[cfg(feature = "fork")]
 pub use os::test::fork;
 
+/// Crate version (e.g. for logging at runtime)
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Short commit hash of code from which this crate was built (e.g. for logging at runtime)
 pub const GIT_COMMIT_SHA_SHORT: &str = env!("VERGEN_SHA_SHORT");
 
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
 
+/// `ipmpsc`-specific error type
 #[derive(ThisError, Debug)]
 pub enum Error {
     /// Error indicating that the caller has attempted to read more than one message from a given
@@ -78,6 +81,7 @@ pub enum Error {
     Bincode(#[from] bincode::Error),
 }
 
+/// `ipmpsc`-specific Result type alias
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn map(file: &File) -> Result<MmapMut> {
