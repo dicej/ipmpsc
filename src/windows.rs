@@ -111,8 +111,8 @@ pub struct Header {
 impl Header {
     pub fn init(&self) -> Result<()> {
         unsafe {
-            ptr::write(self.threads.get(), BitMask::default());
-            ptr::write(self.waiters.get(), BitMask::default());
+            *self.threads.get() = BitMask::default();
+            *self.waiters.get() = BitMask::default();
         }
         self.read.store(crate::BEGINNING, SeqCst);
         self.write.store(crate::BEGINNING, SeqCst);
