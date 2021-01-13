@@ -195,9 +195,9 @@ pub mod test {
 
     impl Descriptor {
         fn forward(&self, dst: &mut dyn Write) -> Result<()> {
-            loop {
-                let mut buffer = [0u8; 1024];
+            let mut buffer = [0u8; 1024];
 
+            loop {
                 let count =
                     unsafe { libc::read(self.0, buffer.as_mut_ptr() as *mut c_void, buffer.len()) };
 
