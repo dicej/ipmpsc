@@ -12,6 +12,7 @@ use os::{Buffer, Header, View};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::UnsafeCell,
+    ffi::c_void,
     fs::{File, OpenOptions},
     mem,
     sync::{atomic::Ordering::SeqCst, Arc},
@@ -44,7 +45,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Commit hash of code from which this crate was built, if available (e.g. for logging at runtime)
 pub const GIT_COMMIT_SHA_SHORT: Option<&str> = option_env!("VERGEN_SHA_SHORT");
 
+/// Offset into shared memory file to find beginning of ring buffer data.
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;
+
+/// If set, indicates the ring buffer was created by a 64-bit process (32-bit otherwise)
+const FLAG_64_BIT: u32 = 1;
 
 /// `ipmpsc`-specific error type
 #[derive(ThisError, Debug)]
@@ -68,6 +73,11 @@ pub enum Error {
     #[error("Too many simultaneous senders")]
     TooManySenders,
 
+    /// Error indicating the ring buffer was initialized by an incompatible version of `ipmpsc` and/or by a process
+    /// with a different word size (32-bit vs. 64-bit)
+    #[error("Incompatible ring buffer (e.g. 32-bit vs. 64-bit or wrong ipmpsc version)")]
+    IncompatibleRingBuffer,
+
     /// Implementation-specific runtime failure (e.g. a libc mutex error).
     #[error("{0}")]
     Runtime(String),
@@ -83,6 +93,14 @@ pub enum Error {
 
 /// `ipmpsc`-specific Result type alias
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn flags() -> u32 {
+    if mem::size_of::<*const c_void>() == 8 {
+        FLAG_64_BIT
+    } else {
+        0
+    }
+}
 
 fn map(file: &File) -> Result<MmapMut> {
     unsafe {
@@ -170,9 +188,13 @@ impl SharedRingBuffer {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let map = unsafe { MmapMut::map_mut(&file)? };
 
-        Ok(Self(View::try_new(Arc::new(UnsafeCell::new(
-            Buffer::try_new(path, map, None)?,
-        )))?))
+        let buffer = Buffer::try_new(path, map, None)?;
+
+        if buffer.header().flags.load(SeqCst) != crate::flags() {
+            return Err(Error::IncompatibleRingBuffer);
+        }
+
+        Ok(Self(View::try_new(Arc::new(UnsafeCell::new(buffer)))?))
     }
 }
 

@@ -33,6 +33,7 @@ macro_rules! nonzero {
 
 #[repr(C)]
 pub struct Header {
+    pub flags: AtomicU32,
     mutex: UnsafeCell<libc::pthread_mutex_t>,
     condition: UnsafeCell<libc::pthread_cond_t>,
     pub read: AtomicU32,
@@ -41,6 +42,8 @@ pub struct Header {
 
 impl Header {
     pub fn init(&self) -> Result<()> {
+        self.flags.store(crate::flags(), SeqCst);
+
         unsafe {
             let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
             nonzero!(libc::pthread_mutexattr_init(attr.as_mut_ptr()))?;

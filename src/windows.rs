@@ -102,6 +102,7 @@ macro_rules! expect {
 
 #[repr(C)]
 pub struct Header {
+    pub flags: AtomicU32,
     threads: UnsafeCell<BitMask>,
     waiters: UnsafeCell<BitMask>,
     pub read: AtomicU32,
@@ -110,10 +111,13 @@ pub struct Header {
 
 impl Header {
     pub fn init(&self) -> Result<()> {
+        self.flags.store(crate::flags(), SeqCst);
+
         unsafe {
             *self.threads.get() = BitMask::default();
             *self.waiters.get() = BitMask::default();
         }
+
         self.read.store(crate::BEGINNING, SeqCst);
         self.write.store(crate::BEGINNING, SeqCst);
 
