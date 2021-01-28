@@ -455,9 +455,9 @@ impl Sender {
     /// latency.
     ///
     /// The serialized size of the message must be greater than zero or else this method will return
-    /// `Err(`[`error::ZeroSizedMessage`](struct.Error.html#variant.ZeroSizedMessage)`))`.  If the serialized size
+    /// `Err(`[`Error::ZeroSizedMessage`](enum.Error.html#variant.ZeroSizedMessage)`))`.  If the serialized size
     /// is greater than the ring buffer capacity, this method will return
-    /// `Err(`[`Error::MessageTooLarge`](struct.Error.html#variant.MessageTooLarge)`))`.
+    /// `Err(`[`Error::MessageTooLarge`](enum.Error.html#variant.MessageTooLarge)`))`.
     pub fn send_when_empty(&self, value: &impl Serialize) -> Result<()> {
         self.send_0(value, true)
     }
