@@ -15,7 +15,10 @@ use std::{
     ffi::c_void,
     fs::{File, OpenOptions},
     mem,
-    sync::{atomic::Ordering::SeqCst, Arc},
+    sync::{
+        atomic::Ordering::{Acquire, Relaxed, Release},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
@@ -190,7 +193,7 @@ impl SharedRingBuffer {
 
         let buffer = Buffer::try_new(path, map, None)?;
 
-        if buffer.header().flags.load(SeqCst) != crate::flags() {
+        if buffer.header().flags.load(Relaxed) != crate::flags() {
             return Err(Error::IncompatibleRingBuffer);
         }
 
@@ -212,7 +215,7 @@ impl Receiver {
     fn seek(&self, position: u32) -> Result<()> {
         let buffer = self.0 .0.buffer();
         let mut lock = buffer.lock()?;
-        buffer.header().read.store(position, SeqCst);
+        buffer.header().read.store(position, Relaxed);
         lock.notify_all()
     }
 
@@ -236,8 +239,8 @@ impl Receiver {
         let buffer = self.0 .0.buffer();
         let map = buffer.map();
 
-        let mut read = buffer.header().read.load(SeqCst);
-        let write = buffer.header().write.load(SeqCst);
+        let mut read = buffer.header().read.load(Relaxed);
+        let write = buffer.header().write.load(Acquire);
 
         Ok(loop {
             if write != read {
@@ -253,7 +256,7 @@ impl Receiver {
                 } else if write < read {
                     read = BEGINNING;
                     let mut lock = buffer.lock()?;
-                    buffer.header().read.store(read, SeqCst);
+                    buffer.header().read.store(read, Relaxed);
                     lock.notify_all()?;
                 } else {
                     return Err(Error::Runtime("corrupt ring buffer".into()));
@@ -332,10 +335,10 @@ impl Receiver {
             let mut now = Instant::now();
             deadline = deadline.or_else(|| timeout.map(|timeout| now + timeout));
 
-            let read = buffer.header().read.load(SeqCst);
+            let read = buffer.header().read.load(Relaxed);
 
             let mut lock = buffer.lock()?;
-            while read == buffer.header().write.load(SeqCst) {
+            while read == buffer.header().write.load(Acquire) {
                 if deadline.map(|deadline| deadline > now).unwrap_or(true) {
                     lock.timed_wait(&self.0 .0, deadline.map(|deadline| deadline - now))?;
 
@@ -446,7 +449,20 @@ impl Sender {
     /// greater than the ring buffer capacity, this method will return
     /// `Err(`[`Error::MessageTooLarge`](enum.Error.html#variant.MessageTooLarge)`))`.
     pub fn send(&self, value: &impl Serialize) -> Result<()> {
-        self.send_0(value, false)
+        self.send_timeout_0(value, false, None).map(drop)
+    }
+
+    /// Send the specified message, waiting for sufficient contiguous space to become available in the ring buffer
+    /// if necessary, but only up to the specified timeout.
+    ///
+    /// This will return `Ok(true)` if the message was sent, or `Ok(false)` if it timed out while waiting.
+    ///
+    /// The serialized size of the message must be greater than zero or else this method will return
+    /// `Err(`[`Error::ZeroSizedMessage`](enum.Error.html#variant.ZeroSizedMessage)`))`.  If the serialized size is
+    /// greater than the ring buffer capacity, this method will return
+    /// `Err(`[`Error::MessageTooLarge`](enum.Error.html#variant.MessageTooLarge)`))`.
+    pub fn send_timeout(&self, value: &impl Serialize, timeout: Duration) -> Result<bool> {
+        self.send_timeout_0(value, false, Some(timeout))
     }
 
     /// Send the specified message, waiting for the ring buffer to become completely empty first.
@@ -459,10 +475,15 @@ impl Sender {
     /// is greater than the ring buffer capacity, this method will return
     /// `Err(`[`Error::MessageTooLarge`](enum.Error.html#variant.MessageTooLarge)`))`.
     pub fn send_when_empty(&self, value: &impl Serialize) -> Result<()> {
-        self.send_0(value, true)
+        self.send_timeout_0(value, true, None).map(drop)
     }
 
-    fn send_0(&self, value: &impl Serialize, wait_until_empty: bool) -> Result<()> {
+    fn send_timeout_0(
+        &self,
+        value: &impl Serialize,
+        wait_until_empty: bool,
+        timeout: Option<Duration>,
+    ) -> Result<bool> {
         let buffer = self.0 .0.buffer();
         let map = self.0 .0.map_mut();
 
@@ -479,10 +500,11 @@ impl Sender {
         }
 
         let mut lock = buffer.lock()?;
+        let mut deadline = None;
         let mut write;
         loop {
-            write = buffer.header().write.load(SeqCst);
-            let read = buffer.header().read.load(SeqCst);
+            write = buffer.header().write.load(Relaxed);
+            let read = buffer.header().read.load(Relaxed);
 
             if write == read || (write > read && !wait_until_empty) {
                 if (write + size + 8) as usize <= map_len {
@@ -495,7 +517,7 @@ impl Sender {
                         &0_u32,
                     )?;
                     write = BEGINNING;
-                    buffer.header().write.store(write, SeqCst);
+                    buffer.header().write.store(write, Release);
                     lock.notify_all()?;
                     continue;
                 }
@@ -503,7 +525,14 @@ impl Sender {
                 break;
             }
 
-            lock.wait(&self.0 .0)?;
+            let now = Instant::now();
+            deadline = deadline.or_else(|| timeout.map(|timeout| now + timeout));
+
+            if deadline.map(|deadline| deadline > now).unwrap_or(true) {
+                lock.timed_wait(&self.0 .0, deadline.map(|deadline| deadline - now))?;
+            } else {
+                return Ok(false);
+            }
         }
 
         let start = write + 4;
@@ -512,10 +541,11 @@ impl Sender {
         let end = start + size;
         bincode::serialize_into(&mut map[start as usize..end as usize], value)?;
 
-        buffer.header().write.store(end, SeqCst);
+        buffer.header().write.store(end, Release);
+
         lock.notify_all()?;
 
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -664,6 +694,29 @@ mod tests {
                 break;
             }
         }
+
+        sender.join().map_err(|e| anyhow!("{:?}", e))??;
+
+        Ok(())
+    }
+
+    #[test]
+    fn slow_receiver_with_send_timeout() -> Result<()> {
+        let (name, buffer) = SharedRingBuffer::create_temp(256)?;
+        let rx = Receiver::new(buffer);
+        let tx = Sender::new(SharedRingBuffer::open(&name)?);
+
+        let sender = os::test::fork(move || loop {
+            if tx
+                .send_timeout(&42_u32, Duration::from_millis(1))
+                .map_err(anyhow::Error::from)?
+            {
+                break Ok(());
+            }
+        })?;
+
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(42_u32, rx.recv()?);
 
         sender.join().map_err(|e| anyhow!("{:?}", e))??;
 

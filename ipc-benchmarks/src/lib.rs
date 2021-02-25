@@ -4,6 +4,8 @@ extern crate test;
 
 use serde_derive::{Deserialize, Serialize};
 
+use std::time::Duration;
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct YuvFrameInfo {
     pub width: u32,
@@ -43,14 +45,28 @@ mod tests {
     use ipmpsc::{Receiver, Sender, SharedRingBuffer};
     use test::Bencher;
 
-    const WIDTH: usize = 3840;
-    const HEIGHT: usize = 2160;
-    const Y_STRIDE: usize = WIDTH;
-    const U_STRIDE: usize = WIDTH / 2;
-    const V_STRIDE: usize = WIDTH / 2;
+    const SMALL: (usize, usize) = (3, 2);
+    const LARGE: (usize, usize) = (3840, 2160);
+
+    fn y_stride(width: usize) -> usize {
+        width
+    }
+
+    fn uv_stride(width: usize) -> usize {
+        width / 2
+    }
 
     #[bench]
-    fn bench_ipmpsc(b: &mut Bencher) -> Result<()> {
+    fn bench_ipmpsc_small(bencher: &mut Bencher) -> Result<()> {
+        bench_ipmpsc(bencher, SMALL)
+    }
+
+    #[bench]
+    fn bench_ipmpsc_large(bencher: &mut Bencher) -> Result<()> {
+        bench_ipmpsc(bencher, LARGE)
+    }
+
+    fn bench_ipmpsc(bencher: &mut Bencher, (width, height): (usize, usize)) -> Result<()> {
         let (name, buffer) = SharedRingBuffer::create_temp(32 * 1024 * 1024)?;
         let mut rx = Receiver::new(buffer);
 
@@ -64,17 +80,17 @@ mod tests {
             let exit_buffer = SharedRingBuffer::open(&exit_name)?;
             let exit_rx = Receiver::new(exit_buffer);
 
-            let y_pixels = vec![128_u8; Y_STRIDE * HEIGHT];
-            let u_pixels = vec![192_u8; U_STRIDE * HEIGHT / 2];
-            let v_pixels = vec![255_u8; V_STRIDE * HEIGHT / 2];
+            let y_pixels = vec![128_u8; y_stride(width) * height];
+            let u_pixels = vec![192_u8; uv_stride(width) * height / 2];
+            let v_pixels = vec![255_u8; uv_stride(width) * height / 2];
 
             let frame = YuvFrame {
                 info: YuvFrameInfo {
-                    width: WIDTH as u32,
-                    height: HEIGHT as u32,
-                    y_stride: Y_STRIDE as u32,
-                    u_stride: U_STRIDE as u32,
-                    v_stride: V_STRIDE as u32,
+                    width: width as _,
+                    height: height as _,
+                    y_stride: y_stride(width) as _,
+                    u_stride: uv_stride(width) as _,
+                    v_stride: uv_stride(width) as _,
                 },
                 y_pixels: &y_pixels,
                 u_pixels: &u_pixels,
@@ -82,7 +98,7 @@ mod tests {
             };
 
             while exit_rx.try_recv::<u8>()?.is_none() {
-                tx.send(&frame)?;
+                tx.send_timeout(&frame, Duration::from_millis(100))?;
             }
 
             Ok(())
@@ -96,7 +112,7 @@ mod tests {
             };
         }
 
-        b.iter(|| {
+        bencher.iter(|| {
             let mut context = rx.zero_copy_context();
             match context.recv::<YuvFrame>() {
                 Err(e) => panic!("error receiving: {:?}", e),
@@ -112,7 +128,16 @@ mod tests {
     }
 
     #[bench]
-    fn bench_ipc_channel(b: &mut Bencher) -> Result<()> {
+    fn bench_ipc_channel_small(bencher: &mut Bencher) -> Result<()> {
+        bench_ipc_channel(bencher, SMALL)
+    }
+
+    #[bench]
+    fn bench_ipc_channel_large(bencher: &mut Bencher) -> Result<()> {
+        bench_ipc_channel(bencher, LARGE)
+    }
+
+    fn bench_ipc_channel(bencher: &mut Bencher, (width, height): (usize, usize)) -> Result<()> {
         let (tx, rx) = ipc::channel()?;
 
         let (exit_name, exit_buffer) = SharedRingBuffer::create_temp(1)?;
@@ -123,17 +148,17 @@ mod tests {
             let exit_rx = Receiver::new(exit_buffer);
 
             while exit_rx.try_recv::<u8>()?.is_none() {
-                let y_pixels = vec![128_u8; Y_STRIDE * HEIGHT];
-                let u_pixels = vec![192_u8; U_STRIDE * HEIGHT / 2];
-                let v_pixels = vec![255_u8; V_STRIDE * HEIGHT / 2];
+                let y_pixels = vec![128_u8; y_stride(width) * height];
+                let u_pixels = vec![192_u8; uv_stride(width) * height / 2];
+                let v_pixels = vec![255_u8; uv_stride(width) * height / 2];
 
                 let frame = OwnedYuvFrame {
                     info: YuvFrameInfo {
-                        width: WIDTH as u32,
-                        height: HEIGHT as u32,
-                        y_stride: Y_STRIDE as u32,
-                        u_stride: U_STRIDE as u32,
-                        v_stride: V_STRIDE as u32,
+                        width: width as _,
+                        height: height as _,
+                        y_stride: y_stride(width) as _,
+                        u_stride: uv_stride(width) as _,
+                        v_stride: uv_stride(width) as _,
                     },
                     y_pixels,
                     u_pixels,
@@ -155,7 +180,7 @@ mod tests {
         // wait for first frame to arrive
         rx.recv().map_err(|e| anyhow!("{:?}", e))?;
 
-        b.iter(|| {
+        bencher.iter(|| {
             match rx.recv() {
                 Err(e) => panic!("error receiving: {:?}", e),
                 Ok(frame) => test::black_box(&frame),
@@ -172,7 +197,19 @@ mod tests {
     }
 
     #[bench]
-    fn bench_ipc_channel_bytes(b: &mut Bencher) -> Result<()> {
+    fn bench_ipc_channel_bytes_small(bencher: &mut Bencher) -> Result<()> {
+        bench_ipc_channel_bytes(bencher, SMALL)
+    }
+
+    #[bench]
+    fn bench_ipc_channel_bytes_large(bencher: &mut Bencher) -> Result<()> {
+        bench_ipc_channel_bytes(bencher, LARGE)
+    }
+
+    fn bench_ipc_channel_bytes(
+        bencher: &mut Bencher,
+        (width, height): (usize, usize),
+    ) -> Result<()> {
         let (tx, rx) = ipc::bytes_channel()?;
 
         let (exit_name, exit_buffer) = SharedRingBuffer::create_temp(1)?;
@@ -182,17 +219,17 @@ mod tests {
             let exit_buffer = SharedRingBuffer::open(&exit_name)?;
             let exit_rx = Receiver::new(exit_buffer);
 
-            let y_pixels = vec![128_u8; Y_STRIDE * HEIGHT];
-            let u_pixels = vec![192_u8; U_STRIDE * HEIGHT / 2];
-            let v_pixels = vec![255_u8; V_STRIDE * HEIGHT / 2];
+            let y_pixels = vec![128_u8; y_stride(width) * height];
+            let u_pixels = vec![192_u8; uv_stride(width) * height / 2];
+            let v_pixels = vec![255_u8; uv_stride(width) * height / 2];
 
             let frame = YuvFrame {
                 info: YuvFrameInfo {
-                    width: WIDTH as u32,
-                    height: HEIGHT as u32,
-                    y_stride: Y_STRIDE as u32,
-                    u_stride: U_STRIDE as u32,
-                    v_stride: V_STRIDE as u32,
+                    width: width as _,
+                    height: height as _,
+                    y_stride: y_stride(width) as _,
+                    u_stride: uv_stride(width) as _,
+                    v_stride: uv_stride(width) as _,
                 },
                 y_pixels: &y_pixels,
                 u_pixels: &u_pixels,
@@ -219,7 +256,7 @@ mod tests {
         // wait for first frame to arrive
         rx.recv().map_err(|e| anyhow!("{:?}", e))?;
 
-        b.iter(|| {
+        bencher.iter(|| {
             match rx.recv() {
                 Err(e) => panic!("error receiving: {:?}", e),
                 Ok(frame) => test::black_box(bincode::deserialize::<YuvFrame>(&frame).unwrap()),
