@@ -707,10 +707,7 @@ mod tests {
         let tx = Sender::new(SharedRingBuffer::open(&name)?);
 
         let sender = os::test::fork(move || loop {
-            if tx
-                .send_timeout(&42_u32, Duration::from_millis(1))
-                .map_err(anyhow::Error::from)?
-            {
+            if tx.send_timeout(&42_u32, Duration::from_millis(1))? {
                 break Ok(());
             }
         })?;
