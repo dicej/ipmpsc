@@ -5,7 +5,7 @@ use std::{
     mem::MaybeUninit,
     os::raw::c_long,
     sync::{
-        atomic::{AtomicU32, Ordering::SeqCst},
+        atomic::{AtomicU32, Ordering::Relaxed},
         Arc,
     },
     time::{Duration, SystemTime},
@@ -42,7 +42,7 @@ pub struct Header {
 
 impl Header {
     pub fn init(&self) -> Result<()> {
-        self.flags.store(crate::flags(), SeqCst);
+        self.flags.store(crate::flags(), Relaxed);
 
         unsafe {
             let mut attr = MaybeUninit::<libc::pthread_mutexattr_t>::uninit();
@@ -64,8 +64,8 @@ impl Header {
             nonzero!(libc::pthread_condattr_destroy(attr.as_mut_ptr()))?;
         }
 
-        self.read.store(crate::BEGINNING, SeqCst);
-        self.write.store(crate::BEGINNING, SeqCst);
+        self.read.store(crate::BEGINNING, Relaxed);
+        self.write.store(crate::BEGINNING, Relaxed);
 
         Ok(())
     }

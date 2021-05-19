@@ -7,7 +7,7 @@ use std::{
     ffi::{CStr, CString},
     ptr, slice,
     sync::{
-        atomic::{AtomicU32, Ordering::SeqCst},
+        atomic::{AtomicU32, Ordering::Relaxed},
         Arc, Mutex,
     },
     time::Duration,
@@ -111,15 +111,15 @@ pub struct Header {
 
 impl Header {
     pub fn init(&self) -> Result<()> {
-        self.flags.store(crate::flags(), SeqCst);
+        self.flags.store(crate::flags(), Relaxed);
 
         unsafe {
             *self.threads.get() = BitMask::default();
             *self.waiters.get() = BitMask::default();
         }
 
-        self.read.store(crate::BEGINNING, SeqCst);
-        self.write.store(crate::BEGINNING, SeqCst);
+        self.read.store(crate::BEGINNING, Relaxed);
+        self.write.store(crate::BEGINNING, Relaxed);
 
         Ok(())
     }
