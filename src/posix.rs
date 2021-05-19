@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use memmap::MmapMut;
+use memmap2::MmapMut;
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,

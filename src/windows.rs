@@ -1,5 +1,5 @@
 use crate::{bitmask::BitMask, Error, Result};
-use memmap::MmapMut;
+use memmap2::MmapMut;
 use sha2::{Digest, Sha256};
 use std::{
     cell::UnsafeCell,
