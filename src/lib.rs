@@ -7,7 +7,7 @@
 
 #![deny(warnings)]
 
-use memmap::MmapMut;
+use memmap2::MmapMut;
 use os::{Buffer, Header, View};
 use serde::{Deserialize, Serialize};
 use std::{
