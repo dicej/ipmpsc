@@ -290,10 +290,8 @@ impl<'a> Lock<'a> {
 
         self.locked = false;
 
-        let _ = milliseconds;
-
         expect!(matches!(
-            unsafe { synchapi::WaitForSingleObject(self.buffer.semaphore(index)?, 10000) },
+            unsafe { synchapi::WaitForSingleObject(self.buffer.semaphore(index)?, milliseconds) },
             winbase::WAIT_OBJECT_0 | winerror::WAIT_TIMEOUT
         ))?;
 
