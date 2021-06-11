@@ -1,6 +1,8 @@
-use std::error::Error;
-use vergen::ConstantsFlags;
+use anyhow::Result;
+use vergen::{Config, ShaKind};
 
-fn main() -> Result<(), Box<dyn Error>> {
-    vergen::generate_cargo_keys(ConstantsFlags::all())
+fn main() -> Result<()> {
+    let mut config = Config::default();
+    *config.git_mut().sha_kind_mut() = ShaKind::Short;
+    vergen::vergen(config)
 }

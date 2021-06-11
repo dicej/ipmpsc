@@ -46,7 +46,7 @@ pub use os::test::fork;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Commit hash of code from which this crate was built, if available (e.g. for logging at runtime)
-pub const GIT_COMMIT_SHA_SHORT: Option<&str> = option_env!("VERGEN_SHA_SHORT");
+pub const GIT_COMMIT_SHA_SHORT: Option<&str> = option_env!("VERGEN_GIT_SHA_SHORT");
 
 /// Offset into shared memory file to find beginning of ring buffer data.
 const BEGINNING: u32 = mem::size_of::<Header>() as u32;

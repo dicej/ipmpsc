@@ -41,7 +41,8 @@ serde_bytes = "0.11"
 errno = "0.2"
 
 [build-dependencies]
-vergen = "3"
+anyhow = "1"
+vergen = "5"
 
 [profile.release]
 debug = true
