@@ -107,7 +107,7 @@ fn flags() -> u32 {
 
 fn map(file: &File) -> Result<MmapMut> {
     unsafe {
-        let map = MmapMut::map_mut(&file)?;
+        let map = MmapMut::map_mut(file)?;
 
         #[allow(clippy::cast_ptr_alignment)]
         (*(map.as_ptr() as *const Header)).init()?;
